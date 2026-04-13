@@ -267,6 +267,21 @@ export const SURGEON_BLOCKS = {
     notes:"IR procedures — cryoablation etc. Easy to work with. IR has cell/wifi issues — avoid care teams."
   },
 
+  // ── ORTHO (additional) ────────────────────────────────────
+  "Swope": {
+    specialty:"Ortho", blockRule:"never",
+    blockCases:[], neverBlock:["all"],
+    notes:"Team Health ortho surgeon (new). No blocks pending confirmation.",
+    flags:["New surgeon — confirm block preference"]
+  },
+
+  // ── UROLOGY (additional) ──────────────────────────────────
+  "Johnson": {
+    specialty:"Urology", blockRule:"never",
+    blockCases:[], neverBlock:["all"],
+    notes:"Urology — cystos only. No blocks. Similar to Flack but not late. Leaving soon."
+  },
+
   // ── UNKNOWN / DEFAULT ─────────────────────────────────────
   "_UNKNOWN_TEAM_HEALTH": {
     specialty:"Ortho Hospitalist", blockRule:"confirm",
