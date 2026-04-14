@@ -219,7 +219,16 @@ export const PROVIDERS = {
     notes:"Near retirement, tires easily. Confirm block capability day-of.",
     flags:["Confirm blocks day-of","Low acuity preferred","Near retirement"]
   },
-  "Shepherd": {
+  "Watkins": {
+    type:"MD", employed:false, locum:true,
+    strengths:["General cases — most types"],
+    avoidances:["Blocks","Fast turnover","Complex high-acuity"],
+    careTeam:true, blockCapable:false, thoracicCapable:false,
+    callPref:"Any routine assignment",
+    lateStay:"unlikely — near retirement", acuity:"medium",
+    notes:"Near retirement. Can do most cases but not preferred in any specific room. No blocks, slow between cases. Not a fast-turnover provider.",
+    flags:["Slow turnover — avoid fast rooms","No blocks","Near retirement — honor pace"]
+  },
     type:"MD", employed:false, locum:true, fullName:"Shepherd, Meredith",
     strengths:["Generalist"],
     avoidances:["Care teams (prefers solo)"],
@@ -253,3 +262,19 @@ export const ANESTHETIST_SHIFTS = {
   "Lead Anesthetist Admin Day": { start:null, end:null,  label:"Admin — NOT in OR", longShift:false },
   "Anesthetist Off/PTO":   { start:null, end:null,       label:"Off/PTO",      longShift:false },
 };
+
+// Known anesthetist roster — used for history tracking and dropdowns
+export const ANESTHETIST_ROSTER = [
+  'Anders, Kendall',
+  'Benzinger',
+  'Blakely, Spencer J',
+  'Colaianni',
+  'Hester, Charles',
+  'Holt, Jordan',
+  'Kemp, Sundance',
+  'McCarter, Niko',
+  'Monteiro, Derrianne M',
+  'Nguyen, An B',
+  'Soloway, Melanie',
+  'Thompson, Riley',
+];

@@ -1,15 +1,10 @@
 import { useState, useEffect } from 'react';
+import { ANESTHETIST_ROSTER } from '../data/providers.js';
 import {
   LOCATION_TYPES, MD_ASSIGNMENT_TYPES,
   loadHistory, saveFullDayHistory, getAllDates,
   getHistoryForDate, deleteHistoryDate, getAnesthetistLocationCounts,
 } from '../utils/history.js';
-
-const ANESTHETISTS = [
-  'Anders, Kendall','Blakely, Spencer J','Hester, Charles','Holt',
-  'McCarter, Niko','Monteiro, Derrianne M','Nguyen, An B','Benzinger',
-  'Colaianni','Johnson','Thompson, Riley',
-];
 
 const MDS = [
   'Eskew, Gregory S','DeWitt, Bracken J','Wu, Jennifer','Kuraganti, Manjusha',
@@ -98,8 +93,13 @@ export default function HistoryTab({ qg }) {
     if (viewDate === date) { setViewDate(''); setViewData([]); }
   };
 
-  // Get anesthetists from QGenda if available, otherwise use default list
-  const anesthetistList = qg?.Anesthetists?.filter(a => !a.isAdmin && !a.isOff).map(a => a.name) || ANESTHETISTS;
+  // Get anesthetists from QGenda if available, otherwise use known roster
+  const anesthetistList = qg?.Anesthetists?.filter(a => !a.isAdmin && !a.isOff).map(a => a.name).length > 0
+    ? [...new Set([
+        ...qg.Anesthetists.filter(a => !a.isAdmin && !a.isOff).map(a => a.name),
+        ...ANESTHETIST_ROSTER
+      ])].sort()
+    : ANESTHETIST_ROSTER;
 
   return (
     <div>

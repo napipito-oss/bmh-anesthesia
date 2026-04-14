@@ -86,12 +86,16 @@ export function parseQGenda(raw, forceDateStr) {
   }
 
   const result = {
-    date: targetDateFormatted, ORCall: null, BackUpCall: null, OBCall: null,
+    date: targetDateFormatted, ORCall: null, OBCall: null,
     CardiacCall: null, BackupCV: null, SevenEightShift: null,
+    BackUpCall: null,
+    BackUpCallAAs: [],
+    aaBackupCall: false,
     PostOR: [], PostOB: [], PTO: [], OFF: [],
     Ranks: {}, Locums: [], Anesthetists: [], workingMDs: [], notAvailable: [],
   };
   const assigned = new Set();
+  const backUpCallNames = [];
 
   // Split into day blocks if it's a multi-day export
   // QGenda weekly exports have day headers like "Thursday\nApril 9, 2026"
@@ -122,13 +126,21 @@ export function parseQGenda(raw, forceDateStr) {
     if (!roleRaw || !name || name.length < 2) continue;
 
     const rankM = rl.match(/rank #(\d+)/);
-    if (rankM) { result.Ranks[parseInt(rankM[1])] = name; continue; }
+    const rankM = rl.match(/rank #(\d+)/);
+    if (rankM) {
+      const rn = parseInt(rankM[1]);
+      if (!result.Ranks[rn]) result.Ranks[rn] = [];
+      result.Ranks[rn].push(name);
+      continue;
+    }
 
     if (rl.includes('anesthetist') || rl.includes('crna')) {
       const shiftM = roleRaw.match(/(630a-730p|7a-3p|7a-5p|7a-8p|7a-7p)/i);
       const isAdmin = rl.includes('admin');
       const isOff = rl.includes('off/pto') || (rl.includes('off') && rl.includes('pto'));
-      if (!isOff) result.Anesthetists.push({ name, shift: shiftM?.[1] || '7a-5p', isAdmin, isOff: false });
+      if (!isOff && !result.Anesthetists.find(a => a.name === name)) {
+        result.Anesthetists.push({ name, shift: shiftM?.[1] || '7a-5p', isAdmin, isOff: false });
+      }
       continue;
     }
 
@@ -139,7 +151,7 @@ export function parseQGenda(raw, forceDateStr) {
       else if (rl.includes('post or')) result.PostOR.push(name);
       else if (rl.includes('post ob')) result.PostOB.push(name);
       else if (rl.includes('or call') && !rl.includes('post') && !rl.includes('back')) result.ORCall = name;
-      else if (rl.includes('back up call') || rl.includes('backup call')) result.BackUpCall = name;
+      else if (rl.includes('back up call') || rl.includes('backup call')) backUpCallNames.push(name);
       else if (rl.includes('ob call')) result.OBCall = name;
       else if (rl.includes('cardiac call')) result.CardiacCall = name;
       else if (rl.includes('backup cv')) result.BackupCV = name;
@@ -147,14 +159,36 @@ export function parseQGenda(raw, forceDateStr) {
       else if (rl.includes('locum')) result.Locums.push(name);
     }
   }
+
+  // Resolve Back Up Call: physician vs AA coverage
+  // Signal: 2+ names in Back Up Call AND those names appear in Anesthetists list
+  const anesthetistNames = new Set(result.Anesthetists.map(a => a.name));
+  const backUpAAs = backUpCallNames.filter(n => anesthetistNames.has(n));
+  const backUpMDs = backUpCallNames.filter(n => !anesthetistNames.has(n));
+  if (backUpAAs.length >= 2 && backUpMDs.length === 0) {
+    result.aaBackupCall = true;
+    result.BackUpCallAAs = backUpAAs;
+    result.BackUpCall = null;
+  } else if (backUpMDs.length >= 1) {
+    result.BackUpCall = backUpMDs[0];
+    result.aaBackupCall = false;
+  } else if (backUpAAs.length === 1) {
+    result.aaBackupCall = true;
+    result.BackUpCallAAs = backUpAAs;
+    result.BackUpCall = null;
+  }
+
   const addMD = (name, role, rankNum) => { if (name && !result.workingMDs.find(p => p.name === name)) result.workingMDs.push({ name, role, rankNum }); };
   addMD(result.ORCall, 'OR Call (#1)', 1);
-  addMD(result.BackUpCall, 'Back Up Call (#2)', 2);
+  if (result.BackUpCall) addMD(result.BackUpCall, 'Back Up Call (#2)', 2);
   addMD(result.CardiacCall, 'Cardiac Call (CV)', 0);
   addMD(result.BackupCV, 'Backup CV', 0);
   addMD(result.OBCall, 'OB Call', 0);
   addMD(result.SevenEightShift, '7/8 Hr Shift', 99);
-  Object.entries(result.Ranks).sort(([a],[b]) => parseInt(a)-parseInt(b)).forEach(([num, name]) => addMD(name, `Rank #${num}`, parseInt(num)));
+  Object.entries(result.Ranks).sort(([a],[b]) => parseInt(a)-parseInt(b)).forEach(([num, names]) => {
+    const nameArr = Array.isArray(names) ? names : [names];
+    nameArr.forEach(n => { if (!anesthetistNames.has(n)) addMD(n, `Rank #${num}`, parseInt(num)); });
+  });
   result.Locums.forEach(name => addMD(name, 'Locum', 50));
   result.notAvailable = [...result.PTO.map(n => ({name:n,reason:'PTO'})),...result.OFF.map(n => ({name:n,reason:'OFF'})),...result.PostOR.map(n => ({name:n,reason:'Post OR — off-site'})),...result.PostOB.map(n => ({name:n,reason:'Post OB — off-site'}))];
   return result;

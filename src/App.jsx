@@ -137,6 +137,7 @@ export default function App() {
           <div className="header-status">
             <span className={qgLoaded ? 'status-ok' : 'status-off'}>● QGenda {qgLoaded ? '✓' : '—'}</span>
             <span className={schedLoaded ? 'status-ok' : 'status-off'}>● Schedule {schedLoaded ? '✓' : '—'}</span>
+            {qg?.aaBackupCall && <span className="status-crit">⚠ AA Backup Call</span>}
             {critFlags.length > 0 && <span className="status-crit">⚠ {critFlags.length} critical</span>}
           </div>
         </div>
@@ -215,6 +216,15 @@ export default function App() {
               {qgLoaded && qg && (
                 <div style={{marginTop:'14px'}}>
                   <div className="section-label">WORKING TODAY</div>
+
+                  {/* AA Backup Call warning */}
+                  {qg.aaBackupCall && (
+                    <div style={{background:'#2a1a00',border:'1px solid #f59e0b',borderRadius:'var(--radius)',padding:'10px 12px',marginBottom:'10px'}}>
+                      <div style={{fontSize:'10px',color:'#fbbf24',fontWeight:'600',letterSpacing:'1px',marginBottom:'4px'}}>⚠ AA BACKUP CALL DAY</div>
+                      <div style={{fontSize:'11px',color:'var(--text-secondary)'}}>No physician on backup call. {qg.BackUpCallAAs.join(' + ')} are covering the backup call role as anesthetists today.</div>
+                      <div style={{fontSize:'10px',color:'var(--text-muted)',marginTop:'4px'}}>After 9pm: if OR Call is occupied in a case and an emergency comes in, both AAs are called in and OR Call physician converts to 1:2 medical direction.</div>
+                    </div>
+                  )}
                   {qg.workingMDs?.map(p => {
                     const isExp = expanded === `md-${p.name}`;
                     const prof = PROVIDERS[p.name];

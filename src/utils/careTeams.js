@@ -119,6 +119,13 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}) {
   const activeAnesthetists = (qg.Anesthetists || []).filter(a => !a.isAdmin && !a.isOff);
   const anesthetistCount = activeAnesthetists.length;
 
+  // Build a set of ALL names already committed anywhere (MDs + anesthetists)
+  // Nobody can appear in two places. This is a hard rule.
+  const globalUsed = new Set();
+  preAssigned.forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
+  // AA backup call names are working as anesthetists — they're in the pool, not MD pool
+  // (already handled by parser — they won't appear in workingMDs)
+
   const config = getCareTeamConfig(anesthetistCount);
   const { careTeamRooms: maxCTRooms, mdsNeeded, ratios, floats: floatCount } = config;
 
@@ -152,9 +159,10 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}) {
   // Brand first — always Endo care team
   const brandMD = workingMDs.find(p => p.name === 'Brand, David L');
   const careTeams = [];
-  const usedMDs = new Set();
-  const usedAnesthetists = new Set();
-  let anesthetistPool = [...activeAnesthetists];
+  const usedMDs = new Set([...globalUsed]);
+  const usedAnesthetists = new Set([...globalUsed]);
+  // Anesthetist pool — exclude anyone already used globally
+  let anesthetistPool = activeAnesthetists.filter(a => !globalUsed.has(a.name));
 
   // Sort anesthetists: prefer variety based on history
   anesthetistPool = sortAnesthetistsByVariety(anesthetistPool, 'endo', anesthetistHistory);
@@ -299,12 +307,14 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}) {
     }
   }
 
-  // Available MDs — not assigned to any room
-  const availableMDsList = mdPool.map((p, i) => ({
-    ...p,
-    availabilityRank: i + 1,
-    label: i === 0 ? '1st Available' : i === 1 ? '2nd Available' : `${i+1}th Available`,
-  }));
+  // Available MDs — not assigned to any room, not used anywhere else
+  const availableMDsList = mdPool
+    .filter(p => !globalUsed.has(p.name) && !usedMDs.has(p.name))
+    .map((p, i) => ({
+      ...p,
+      availabilityRank: i + 1,
+      label: i === 0 ? '1st Available' : i === 1 ? '2nd Available' : `${i+1}th Available`,
+    }));
 
   return {
     rooms,
