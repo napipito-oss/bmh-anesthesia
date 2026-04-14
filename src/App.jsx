@@ -89,6 +89,13 @@ export default function App() {
   const [orCallChoice, setOrCallChoice] = useState(null);
   const [pendingRooms, setPendingRooms] = useState(null);
 
+  // OR.Endo.CCL Resource Structure — Step 3
+  const [resourceStructure, setResourceStructure] = useState({
+    mainOR: '', endo: '', cath: '', boos: '', ir: ''
+  });
+  const [resourceLoaded, setResourceLoaded] = useState(false);
+  const [coverageGaps, setCoverageGaps] = useState([]);
+
   // Load anesthetist history on mount
   useEffect(() => {
     // History loaded lazily when needed by care team engine
@@ -129,6 +136,64 @@ export default function App() {
     finishBuildingSchedule(pendingRooms, null);
   }, [pendingRooms, finishBuildingSchedule]);
 
+  const loadResourceStructure = useCallback((currentRooms) => {
+    const rs = resourceStructure;
+    const mainOR = parseInt(rs.mainOR) || 0;
+    const endo = parseInt(rs.endo) || 0;
+    const cath = parseInt(rs.cath) || 0;
+    const boos = parseInt(rs.boos) || 0;
+    const ir = parseInt(rs.ir) || 0;
+    const roomsToAnalyze = currentRooms || rooms;
+    const gaps = [];
+
+    const cubeEndo = roomsToAnalyze.filter(r => r.isEndo).length;
+    const cubeCath = roomsToAnalyze.filter(r => r.isCathEP).length;
+    const cubeBOOS = roomsToAnalyze.filter(r => r.isBOOS).length;
+    const cubeIR = roomsToAnalyze.filter(r => (r.room||'').toLowerCase().includes('rir') || (r.room||'').toLowerCase().includes('ir ')).length;
+    const cubeMainOR = roomsToAnalyze.filter(r =>
+      !r.isEndo && !r.isCathEP && !r.isBOOS &&
+      !(r.room||'').toLowerCase().includes('rir') &&
+      !(r.room||'').toLowerCase().includes('ir ')
+    ).length;
+
+    if (endo > 0 && cubeEndo < endo) {
+      const gap = endo - cubeEndo;
+      gaps.push({ area:'ENDO', needed:endo, booked:cubeEndo, gap, level:'warn',
+        msg:`Endo: ${endo} rooms committed, ${cubeEndo} booked → ${gap} room(s) unstaffed. Staff for inpatient add-ons — cases may not show in cube yet.` });
+    }
+    if (cath > 0 && cubeCath < cath) {
+      const gap = cath - cubeCath;
+      gaps.push({ area:'CATH', needed:cath, booked:cubeCath, gap, level:'warn',
+        msg:`Cath Lab: ${cath} slots committed, ${cubeCath} booked → ${gap} slot(s) for TEE/cardioversion/cath minor. Keep cardiac-capable provider available.` });
+    }
+    if (mainOR > 0 && cubeMainOR < mainOR) {
+      const gap = mainOR - cubeMainOR;
+      const isJustAddon = gap === 1;
+      gaps.push({ area:'MAIN OR', needed:mainOR, booked:cubeMainOR, gap,
+        level: gap > 1 ? 'critical' : 'warn',
+        msg:`Main OR: ${mainOR} rooms committed, ${cubeMainOR} booked → ${gap} unbooked.${isJustAddon ? ' Includes add-on room — staff it even with no cases.' : ' Includes add-on room + possible open heart coverage (OR 5).'}` });
+    }
+    if (boos > 0 && cubeBOOS < boos) {
+      const gap = boos - cubeBOOS;
+      gaps.push({ area:'BOOS', needed:boos, booked:cubeBOOS, gap, level:'info',
+        msg:`BOOS: ${boos} rooms committed, ${cubeBOOS} booked → ${gap} for add-ons.` });
+    }
+    if (ir > 0 && cubeIR < ir) {
+      const gap = ir - cubeIR;
+      gaps.push({ area:'IR', needed:ir, booked:cubeIR, gap, level:'info',
+        msg:`IR: ${ir} slot committed, ${cubeIR} booked → keep IR-capable provider available.` });
+    }
+
+    // Cath pull opportunity — light day
+    if (cath > 0 && cubeCath === 1 && cath >= 2) {
+      gaps.push({ area:'CATH', needed:cath, booked:cubeCath, gap:0, level:'info',
+        msg:`Cath Lab light today (1 case vs ${cath} slots) — consider pulling cath minor resource to cover main OR if short-staffed.` });
+    }
+
+    setCoverageGaps(gaps);
+    setResourceLoaded(true);
+  }, [resourceStructure, rooms]);
+
   const updateAssignment = useCallback((room, provider) => {
     setRooms(prev => prev.map(r => r.room === room ? { ...r, assignedProvider: provider } : r));
   }, []);
@@ -165,7 +230,9 @@ export default function App() {
           <div className="header-status">
             <span className={qgLoaded ? 'status-ok' : 'status-off'}>● QGenda {qgLoaded ? '✓' : '—'}</span>
             <span className={schedLoaded ? 'status-ok' : 'status-off'}>● Schedule {schedLoaded ? '✓' : '—'}</span>
+            <span className={resourceLoaded ? 'status-ok' : 'status-off'}>● Resource {resourceLoaded ? '✓' : '—'}</span>
             {qg?.aaBackupCall && <span className="status-crit">⚠ AA Backup Call</span>}
+            {coverageGaps.filter(g=>g.level==='critical').length > 0 && <span className="status-crit">⚠ {coverageGaps.filter(g=>g.level==='critical').length} gap{coverageGaps.filter(g=>g.level==='critical').length>1?'s':''}</span>}
             {critFlags.length > 0 && <span className="status-crit">⚠ {critFlags.length} critical</span>}
           </div>
         </div>
@@ -185,7 +252,7 @@ export default function App() {
 
         {/* DAILY BOARD */}
         {tab === 'board' && (
-          <div className="grid-2">
+          <div className="grid-3">
             {/* QGenda */}
             <div>
               <div className="section-label">STEP 1 — QGENDA EXPORT</div>
@@ -367,6 +434,112 @@ export default function App() {
                   {critFlags.map((f,i)=><div key={i} className="flag-crit">⚠ {f.room}: {f.msg}</div>)}
                 </div>
                   ) : null}
+                </div>
+              )}
+            </div>
+
+            {/* ── STEP 3: RESOURCE STRUCTURE ── */}
+            <div>
+              <div className="section-label">STEP 3 — OR.ENDO.CCL RESOURCE STRUCTURE</div>
+              <div className="card">
+                <div className="card-hint">
+                  Enter today's row from the OR.Endo.CCL Resource Structure spreadsheet. This tells the app how many rooms we're committed to covering — independent of what's booked in the cube.
+                </div>
+
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'10px'}}>
+                  {[
+                    { key:'mainOR', label:'MAIN OR' },
+                    { key:'endo',   label:'ENDO' },
+                    { key:'cath',   label:'CATH LAB' },
+                    { key:'boos',   label:'BOOS (Ortho AS)' },
+                    { key:'ir',     label:'IR' },
+                  ].map(({ key, label }) => (
+                    <div key={key}>
+                      <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>{label}</div>
+                      <input
+                        type="number" min="0" max="15"
+                        value={resourceStructure[key]}
+                        onChange={e => setResourceStructure(prev => ({ ...prev, [key]: e.target.value }))}
+                        placeholder="0"
+                        style={{
+                          width:'100%', background:'var(--bg-base)', border:'1px solid var(--border)',
+                          borderRadius:'var(--radius-sm)', color:'var(--text-primary)',
+                          padding:'6px 10px', fontSize:'13px', fontFamily:'var(--font-mono)',
+                          outline:'none', textAlign:'center',
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  className="btn"
+                  onClick={() => loadResourceStructure()}
+                  disabled={!schedLoaded}
+                  style={{opacity: schedLoaded ? 1 : 0.5, width:'100%'}}
+                >
+                  ANALYZE COVERAGE GAPS
+                </button>
+
+                {!schedLoaded && (
+                  <div style={{fontSize:'10px',color:'var(--text-muted)',marginTop:'6px'}}>
+                    Load schedule first (Step 2)
+                  </div>
+                )}
+              </div>
+
+              {/* Coverage gap results */}
+              {resourceLoaded && (
+                <div style={{marginTop:'12px'}}>
+                  {coverageGaps.length === 0 ? (
+                    <div style={{background:'#0f2a1e',border:'1px solid #22c55e',borderRadius:'var(--radius)',padding:'10px 12px'}}>
+                      <div style={{fontSize:'10px',color:'#4ade80',letterSpacing:'1px'}}>✓ COVERAGE COMPLETE</div>
+                      <div style={{fontSize:'11px',color:'var(--text-secondary)',marginTop:'3px'}}>All committed rooms have cases booked. No gaps detected.</div>
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="section-label">COVERAGE GAPS — {coverageGaps.length} FOUND</div>
+                      {coverageGaps.map((gap, i) => (
+                        <div key={i} className={gap.level === 'critical' ? 'flag-crit' : gap.level === 'warn' ? 'flag-warn' : 'flag-info'}
+                          style={{marginBottom:'6px'}}>
+                          <div style={{fontWeight:'600',letterSpacing:'1px',fontSize:'9px',marginBottom:'3px'}}>
+                            {gap.area} — {gap.needed} committed / {gap.booked} booked
+                          </div>
+                          <div>{gap.msg}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Total committed vs available */}
+                  {(() => {
+                    const total = (parseInt(resourceStructure.mainOR)||0) +
+                      (parseInt(resourceStructure.endo)||0) +
+                      (parseInt(resourceStructure.cath)||0) +
+                      (parseInt(resourceStructure.boos)||0) +
+                      (parseInt(resourceStructure.ir)||0);
+                    const mds = qg?.workingMDs?.length || 0;
+                    const aas = qg?.Anesthetists?.filter(a=>!a.isAdmin&&!a.isOff).length || 0;
+                    return total > 0 ? (
+                      <div style={{background:'var(--bg-surface)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'10px 12px',marginTop:'8px'}}>
+                        <div style={{fontSize:'10px',color:'var(--accent-blue)',letterSpacing:'2px',marginBottom:'6px'}}>STAFFING SUMMARY</div>
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',textAlign:'center'}}>
+                          <div>
+                            <div style={{fontSize:'18px',color:'var(--text-primary)',fontWeight:'600'}}>{total}</div>
+                            <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>ROOMS COMMITTED</div>
+                          </div>
+                          <div>
+                            <div style={{fontSize:'18px',color:'var(--accent-blue)',fontWeight:'600'}}>{mds}</div>
+                            <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>MDs WORKING</div>
+                          </div>
+                          <div>
+                            <div style={{fontSize:'18px',color:'var(--accent-teal)',fontWeight:'600'}}>{aas}</div>
+                            <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>AAs/CRNAs</div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null;
+                  })()}
                 </div>
               )}
             </div>

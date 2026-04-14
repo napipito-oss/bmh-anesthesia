@@ -22,6 +22,7 @@
 
 /* ── LAYOUT ── */
 .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+.grid-3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:20px; }
 .grid-2-sm { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
 .room-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:10px; }
 .provider-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:8px; }
@@ -124,8 +125,11 @@
 .legend { font-size:10px; color:var(--text-muted); margin-bottom:12px; line-height:2; }
 
 /* ── RESPONSIVE ── */
+@media (max-width: 1100px) {
+  .grid-3 { grid-template-columns:1fr 1fr; }
+}
 @media (max-width: 768px) {
-  .grid-2 { grid-template-columns:1fr; }
+  .grid-2, .grid-3 { grid-template-columns:1fr; }
   .header-title { font-size:14px; }
   .tabs { overflow-x:auto; }
   .tab { white-space:nowrap; padding:10px 10px; font-size:9px; }
