@@ -73,27 +73,56 @@ function needsAnesthesia(procedure, surgeon, room) {
   return { needs: true, reason: 'Standard case' };
 }
 
-export function parseQGenda(raw) {
+export function parseQGenda(raw, forceDateStr) {
   if (!raw?.trim()) return null;
+
+  // Convert YYYY-MM-DD to day-of-week name for matching QGenda day headers
+  let targetDayName = null;
+  let targetDateFormatted = null;
+  if (forceDateStr) {
+    const d = new Date(forceDateStr + 'T12:00:00');
+    targetDayName = d.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+    targetDateFormatted = d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  }
+
   const result = {
-    date: null, ORCall: null, BackUpCall: null, OBCall: null,
+    date: targetDateFormatted, ORCall: null, BackUpCall: null, OBCall: null,
     CardiacCall: null, BackupCV: null, SevenEightShift: null,
     PostOR: [], PostOB: [], PTO: [], OFF: [],
     Ranks: {}, Locums: [], Anesthetists: [], workingMDs: [], notAvailable: [],
   };
   const assigned = new Set();
-  for (const line of raw.trim().split('\n')) {
+
+  // Split into day blocks if it's a multi-day export
+  // QGenda weekly exports have day headers like "Thursday\nApril 9, 2026"
+  const lines = raw.trim().split('\n');
+  let inTargetDay = !forceDateStr; // if no date specified, parse everything
+  let foundTargetDay = false;
+
+  for (const line of lines) {
     const parts = line.split('\t').map(p => p.trim());
     const roleRaw = parts[0]?.trim() || '';
     const name = parts[1]?.trim() || '';
     const rl = roleRaw.toLowerCase();
+
+    // Detect day headers (e.g. "Thursday", "April 9, 2026")
+    const isDayName = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].some(d => rl.trim() === d);
+    const isDateLine = /^[a-z]+ \d+, \d{4}$/i.test(roleRaw.trim());
+
+    if (isDayName) {
+      if (forceDateStr) {
+        inTargetDay = (rl.trim() === targetDayName);
+        if (inTargetDay) foundTargetDay = true;
+      }
+      continue;
+    }
+    if (isDateLine) continue;
+    if (!inTargetDay) continue;
     if (!roleRaw || !name || name.length < 2) continue;
-    const skipWords = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday',
-      'january','february','march','april','may','june','july','august','september',
-      'october','november','december','scheduled','grand total'];
-    if (skipWords.some(w => rl.includes(w))) { const dm = roleRaw.match(/(\w+ \d+, \d{4})/); if (dm) result.date = dm[1]; continue; }
+
     const rankM = rl.match(/rank #(\d+)/);
     if (rankM) { result.Ranks[parseInt(rankM[1])] = name; continue; }
+
     if (rl.includes('anesthetist') || rl.includes('crna')) {
       const shiftM = roleRaw.match(/(630a-730p|7a-3p|7a-5p|7a-8p|7a-7p)/i);
       const isAdmin = rl.includes('admin');
@@ -101,6 +130,7 @@ export function parseQGenda(raw) {
       if (!isOff) result.Anesthetists.push({ name, shift: shiftM?.[1] || '7a-5p', isAdmin, isOff: false });
       continue;
     }
+
     if (name && !assigned.has(name)) {
       assigned.add(name);
       if (rl.includes('personal time off')) result.PTO.push(name);

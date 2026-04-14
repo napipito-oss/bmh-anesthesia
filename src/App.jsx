@@ -70,18 +70,26 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState('');
 
   const loadQG = useCallback(() => {
-    const parsed = parseQGenda(qgRaw);
+    const parsed = parseQGenda(qgRaw, selectedDate);
     if (!parsed) return;
     setQg(parsed);
     setQgLoaded(true);
     if (rooms.length) setRooms(buildAssignments(rooms, parsed));
-  }, [qgRaw, rooms]);
+  }, [qgRaw, rooms, selectedDate]);
+
+  const [dateMismatch, setDateMismatch] = useState(false);
 
   const loadSchedule = useCallback(() => {
     const parsed = parseCubeData(cubeRaw, selectedDate);
     const assigned = qg ? buildAssignments(parsed.rooms, qg) : parsed.rooms;
     setRooms(assigned);
     setSchedLoaded(true);
+    // Check if the date we asked for actually had cases
+    if (selectedDate && parsed.totalParsed === 0) {
+      setDateMismatch(true);
+    } else {
+      setDateMismatch(false);
+    }
   }, [cubeRaw, qg, selectedDate]);
 
   const updateAssignment = useCallback((room, provider) => {
@@ -144,9 +152,55 @@ export default function App() {
             <div>
               <div className="section-label">STEP 1 — QGENDA EXPORT</div>
               <div className="card">
+
+                {/* Date picker lives here — drives everything */}
+                <div style={{marginBottom:'12px'}}>
+                  <div style={{fontSize:'10px',color:'var(--accent-blue)',letterSpacing:'2px',marginBottom:'6px'}}>SELECT DATE TO BUILD</div>
+                  <div style={{display:'flex',alignItems:'center',gap:'10px',flexWrap:'wrap'}}>
+                    <input
+                      type="date"
+                      value={selectedDate}
+                      onChange={e => {
+                        setSelectedDate(e.target.value);
+                        // Reset loaded data when date changes
+                        setSchedLoaded(false);
+                        setQgLoaded(false);
+                        setRooms([]);
+                        setQg(null);
+                      }}
+                      style={{
+                        background:'var(--bg-base)',
+                        border:'1px solid var(--border-bright)',
+                        borderRadius:'var(--radius)',
+                        color: selectedDate ? 'var(--text-primary)' : 'var(--text-muted)',
+                        padding:'7px 12px',
+                        fontSize:'12px',
+                        fontFamily:'var(--font-mono)',
+                        cursor:'pointer',
+                        outline:'none',
+                      }}
+                    />
+                    {selectedDate && (
+                      <span style={{fontSize:'11px',color:'var(--accent-blue)',fontWeight:'600'}}>
+                        {new Date(selectedDate + 'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}
+                      </span>
+                    )}
+                  </div>
+                  {!selectedDate && (
+                    <div style={{fontSize:'10px',color:'var(--accent-amber)',marginTop:'5px'}}>
+                      ⚠ Select a date first — this drives both QGenda and the schedule
+                    </div>
+                  )}
+                </div>
+
                 <textarea className="textarea" value={qgRaw} onChange={e=>setQgRaw(e.target.value)}
-                  placeholder={"Paste QGenda Calendar By Task export...\n\nOR Call\tEskew, Gregory S\nBack Up Call\tSingh, Karampal\nLocum\tNielson, Mark\n..."} />
-                <button className="btn" onClick={loadQG} style={{marginTop:'10px'}}>LOAD STAFFING</button>
+                  placeholder={"Paste full week QGenda Calendar By Task export...\n\nOR Call\tEskew, Gregory S\nBack Up Call\tSingh, Karampal\nLocum\tNielson, Mark\n..."}
+                  disabled={!selectedDate}
+                  style={{opacity: selectedDate ? 1 : 0.5}}
+                />
+                <button className="btn" onClick={loadQG} style={{marginTop:'10px', opacity: selectedDate ? 1 : 0.5}} disabled={!selectedDate}>
+                  {selectedDate ? 'LOAD STAFFING' : 'SELECT A DATE FIRST'}
+                </button>
               </div>
 
               {qgLoaded && qg && (
@@ -216,61 +270,44 @@ export default function App() {
             <div>
               <div className="section-label">STEP 2 — CUBE SCHEDULE (paste all data)</div>
               <div className="card">
-                <div className="card-hint">Paste full SharePoint cube file contents. Select the date you want to build, then click Load Schedule.</div>
-
-                <div style={{marginBottom:'10px'}}>
-                  <div style={{fontSize:'10px',color:'var(--text-secondary)',marginBottom:'5px',letterSpacing:'1px'}}>DATE TO BUILD</div>
-                  <input
-                    type="date"
-                    value={selectedDate}
-                    onChange={e => setSelectedDate(e.target.value)}
-                    style={{
-                      background:'var(--bg-base)',
-                      border:'1px solid var(--border)',
-                      borderRadius:'var(--radius)',
-                      color: selectedDate ? 'var(--text-primary)' : 'var(--text-muted)',
-                      padding:'7px 12px',
-                      fontSize:'12px',
-                      fontFamily:'var(--font-mono)',
-                      cursor:'pointer',
-                      outline:'none',
-                      width:'180px',
-                    }}
-                  />
-                  {selectedDate && (
-                    <span style={{fontSize:'10px',color:'var(--accent-blue)',marginLeft:'10px'}}>
-                      {new Date(selectedDate + 'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}
-                    </span>
-                  )}
+                <div className="card-hint">
+                  Paste the full SharePoint cube file. The parser will automatically filter to{' '}
+                  {selectedDate
+                    ? <strong>{new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'})}</strong>
+                    : <span style={{color:'var(--accent-amber)'}}>the date selected in Step 1</span>
+                  }.
                 </div>
-
                 <textarea className="textarea" value={cubeRaw} onChange={e=>setCubeRaw(e.target.value)}
-                  placeholder={"Paste entire cube schedule here — all dates, all areas.\nSelect a date above, then click Load Schedule.\n\nBMH OR\n4/9/2026 8:30 AM\tBMHOR-2026-701\tBMH OR 10\t..."} />
+                  placeholder={"Paste entire cube schedule here — all dates, all areas.\nDate is set from Step 1.\n\nBMH OR\n4/14/2026 7:30 AM\tBMHOR-2026-701\tBMH OR 10\t..."}
+                  disabled={!selectedDate}
+                  style={{opacity: selectedDate ? 1 : 0.5}}
+                />
                 <button
                   className="btn"
                   onClick={loadSchedule}
                   style={{marginTop:'10px', opacity: selectedDate ? 1 : 0.5}}
                   disabled={!selectedDate}
                 >
-                  {selectedDate ? 'LOAD SCHEDULE' : 'SELECT A DATE FIRST'}
+                  LOAD SCHEDULE
                 </button>
-                {!selectedDate && cubeRaw && (
-                  <div style={{fontSize:'10px',color:'var(--accent-amber)',marginTop:'6px'}}>
-                    ⚠ Select a date above before loading
-                  </div>
-                )}
               </div>
 
-              {schedLoaded && rooms.length > 0 && (
+              {schedLoaded && (
                 <div style={{marginTop:'14px'}}>
-                  <div className="section-label">
-                    SCHEDULE — {rooms.length} ROOMS
-                    {selectedDate && (
-                      <span style={{color:'var(--text-secondary)',fontWeight:'normal',marginLeft:'8px',letterSpacing:'0'}}>
-                        {new Date(selectedDate + 'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}
-                      </span>
-                    )}
-                  </div>
+                  {dateMismatch ? (
+                    <div className="flag-crit">
+                      ⚠ No cases found for {selectedDate ? new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'}) : 'selected date'}. The cube data may not contain cases for this date yet — try refreshing the cube file, or check that the correct date is selected.
+                    </div>
+                  ) : rooms.length > 0 ? (
+                    <div>
+                      <div className="section-label">
+                        SCHEDULE — {rooms.length} ROOMS
+                        {selectedDate && (
+                          <span style={{color:'var(--text-secondary)',fontWeight:'normal',marginLeft:'8px',letterSpacing:'0'}}>
+                            {new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}
+                          </span>
+                        )}
+                      </div>
                   <div className="chip-row">
                     {[['cardiac','#8b5cf6'],['high','#ef4444'],['peds','#3b82f6'],['medium-high','#f97316']].map(([a,c])=>{
                       const ct = rooms.filter(r=>r.acuity===a).length;
@@ -281,6 +318,8 @@ export default function App() {
                     )}
                   </div>
                   {critFlags.map((f,i)=><div key={i} className="flag-crit">⚠ {f.room}: {f.msg}</div>)}
+                </div>
+                  ) : null}
                 </div>
               )}
             </div>
