@@ -67,6 +67,7 @@ export default function App() {
   const [qgLoaded, setQgLoaded] = useState(false);
   const [provSearch, setProvSearch] = useState('');
   const [surgSearch, setSurgSearch] = useState('');
+  const [selectedDate, setSelectedDate] = useState('');
 
   const loadQG = useCallback(() => {
     const parsed = parseQGenda(qgRaw);
@@ -77,11 +78,11 @@ export default function App() {
   }, [qgRaw, rooms]);
 
   const loadSchedule = useCallback(() => {
-    const parsed = parseCubeData(cubeRaw);
-    const assigned = qg ? buildAssignments(parsed, qg) : parsed;
+    const parsed = parseCubeData(cubeRaw, selectedDate);
+    const assigned = qg ? buildAssignments(parsed.rooms, qg) : parsed.rooms;
     setRooms(assigned);
     setSchedLoaded(true);
-  }, [cubeRaw, qg]);
+  }, [cubeRaw, qg, selectedDate]);
 
   const updateAssignment = useCallback((room, provider) => {
     setRooms(prev => prev.map(r => r.room === room ? { ...r, assignedProvider: provider } : r));
@@ -111,7 +112,11 @@ export default function App() {
           <div className="header-title">ANESTHESIA COMMAND CENTER</div>
         </div>
         <div className="header-right">
-          <div className="header-date">{today}</div>
+          <div className="header-date">
+            {schedLoaded && selectedDate
+              ? new Date(selectedDate + 'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})
+              : today}
+          </div>
           <div className="header-status">
             <span className={qgLoaded ? 'status-ok' : 'status-off'}>● QGenda {qgLoaded ? '✓' : '—'}</span>
             <span className={schedLoaded ? 'status-ok' : 'status-off'}>● Schedule {schedLoaded ? '✓' : '—'}</span>
@@ -211,15 +216,61 @@ export default function App() {
             <div>
               <div className="section-label">STEP 2 — CUBE SCHEDULE (paste all data)</div>
               <div className="card">
-                <div className="card-hint">Paste full SharePoint cube file contents. Parser automatically finds today's cases, filters no-anesthesia cases, and groups rooms.</div>
+                <div className="card-hint">Paste full SharePoint cube file contents. Select the date you want to build, then click Load Schedule.</div>
+
+                <div style={{marginBottom:'10px'}}>
+                  <div style={{fontSize:'10px',color:'var(--text-secondary)',marginBottom:'5px',letterSpacing:'1px'}}>DATE TO BUILD</div>
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    onChange={e => setSelectedDate(e.target.value)}
+                    style={{
+                      background:'var(--bg-base)',
+                      border:'1px solid var(--border)',
+                      borderRadius:'var(--radius)',
+                      color: selectedDate ? 'var(--text-primary)' : 'var(--text-muted)',
+                      padding:'7px 12px',
+                      fontSize:'12px',
+                      fontFamily:'var(--font-mono)',
+                      cursor:'pointer',
+                      outline:'none',
+                      width:'180px',
+                    }}
+                  />
+                  {selectedDate && (
+                    <span style={{fontSize:'10px',color:'var(--accent-blue)',marginLeft:'10px'}}>
+                      {new Date(selectedDate + 'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}
+                    </span>
+                  )}
+                </div>
+
                 <textarea className="textarea" value={cubeRaw} onChange={e=>setCubeRaw(e.target.value)}
-                  placeholder={"Paste entire cube schedule here — all dates, all areas.\nParser finds today's cases automatically.\n\nBMH OR\n4/9/2026 8:30 AM\tBMHOR-2026-701\tBMH OR 10\t..."} />
-                <button className="btn" onClick={loadSchedule} style={{marginTop:'10px'}}>LOAD SCHEDULE</button>
+                  placeholder={"Paste entire cube schedule here — all dates, all areas.\nSelect a date above, then click Load Schedule.\n\nBMH OR\n4/9/2026 8:30 AM\tBMHOR-2026-701\tBMH OR 10\t..."} />
+                <button
+                  className="btn"
+                  onClick={loadSchedule}
+                  style={{marginTop:'10px', opacity: selectedDate ? 1 : 0.5}}
+                  disabled={!selectedDate}
+                >
+                  {selectedDate ? 'LOAD SCHEDULE' : 'SELECT A DATE FIRST'}
+                </button>
+                {!selectedDate && cubeRaw && (
+                  <div style={{fontSize:'10px',color:'var(--accent-amber)',marginTop:'6px'}}>
+                    ⚠ Select a date above before loading
+                  </div>
+                )}
               </div>
 
               {schedLoaded && rooms.length > 0 && (
                 <div style={{marginTop:'14px'}}>
-                  <div className="section-label">SCHEDULE — {rooms.length} ROOMS</div>
+                  <div className="section-label">
+                    SCHEDULE — {rooms.length} ROOMS
+                    {selectedDate && (
+                      <span style={{color:'var(--text-secondary)',fontWeight:'normal',marginLeft:'8px',letterSpacing:'0'}}>
+                        {new Date(selectedDate + 'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}
+                      </span>
+                    )}
+                  </div>
                   <div className="chip-row">
                     {[['cardiac','#8b5cf6'],['high','#ef4444'],['peds','#3b82f6'],['medium-high','#f97316']].map(([a,c])=>{
                       const ct = rooms.filter(r=>r.acuity===a).length;

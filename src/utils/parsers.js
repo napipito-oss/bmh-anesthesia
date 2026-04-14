@@ -189,7 +189,7 @@ export function classifyCase(procedure, surgeon, room) {
   return { acuity, caseType, isFastTurnover, isRobotic, isCathEP, isCardiac, isThoracic, isEndo, isBOOS, blockRequired, blockPossible, blockNote, preferredProviders:[...new Set(preferredProviders)], avoidProviders:[...new Set(avoidProviders)], flags };
 }
 
-export function parseCubeData(raw) {
+export function parseCubeData(raw, forceDateStr) {
   if (!raw?.trim()) return { rooms:[], excluded:[], flagged:[], targetDate:null, totalParsed:0 };
   const lines = raw.trim().split('\n');
   const allCases = [];
@@ -225,8 +225,16 @@ export function parseCubeData(raw) {
 
   const dateCounts = {};
   allCases.forEach(c => { if (c.date) dateCounts[c.date]=(dateCounts[c.date]||0)+1; });
-  const today = new Date().toLocaleDateString('en-US');
-  const targetDate = dateCounts[today] ? today : Object.entries(dateCounts).sort((a,b)=>b[1]-a[1])[0]?.[0];
+
+  // If user selected a date, convert from YYYY-MM-DD to M/D/YYYY format to match cube data
+  let targetDate;
+  if (forceDateStr) {
+    const d = new Date(forceDateStr + 'T12:00:00');
+    targetDate = `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
+  } else {
+    const today = new Date().toLocaleDateString('en-US');
+    targetDate = dateCounts[today] ? today : Object.entries(dateCounts).sort((a,b)=>b[1]-a[1])[0]?.[0];
+  }
   const todayCases = allCases.filter(c => c.date === targetDate);
   const needsCoverage = todayCases.filter(c => c.needsAnesthesia);
   const excluded = todayCases.filter(c => !c.needsAnesthesia);
