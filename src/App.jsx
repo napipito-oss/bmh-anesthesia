@@ -4,8 +4,10 @@ import { SURGEON_BLOCKS } from './data/surgeons.js';
 import { parseQGenda, parseCubeData, buildAssignments } from './utils/parsers.js';
 import { buildCareTeams, CARE_TEAM_COLORS } from './utils/careTeams.js';
 import { getAnesthetistLocationCounts, saveFullDayHistory } from './utils/history.js';
+import { saveORCallChoice, getORCallPrediction } from './utils/orCallTracker.js';
 import { callAI } from './utils/api.js';
 import HistoryTab from './components/HistoryTab.jsx';
+import ORCallPrompt from './components/ORCallPrompt.jsx';
 import './App.css';
 
 // ── CONSTANTS ────────────────────────────────────────────────
@@ -83,6 +85,9 @@ export default function App() {
 
   const [dateMismatch, setDateMismatch] = useState(false);
   const [careTeamResult, setCareTeamResult] = useState(null);
+  const [showORCallPrompt, setShowORCallPrompt] = useState(false);
+  const [orCallChoice, setOrCallChoice] = useState(null);
+  const [pendingRooms, setPendingRooms] = useState(null);
 
   // Load anesthetist history on mount
   useEffect(() => {
@@ -91,15 +96,38 @@ export default function App() {
 
   const loadSchedule = useCallback(() => {
     const parsed = parseCubeData(cubeRaw, selectedDate);
-    const assigned = qg ? buildAssignments(parsed.rooms, qg) : parsed.rooms;
-    // Run care team engine
+    setDateMismatch(selectedDate && parsed.totalParsed === 0);
+    // Store parsed rooms and show OR Call prompt before building care teams
+    setPendingRooms(parsed.rooms);
+    setSchedLoaded(true);
+    if (qg?.ORCall && parsed.rooms.length > 0) {
+      setShowORCallPrompt(true);
+    } else {
+      finishBuildingSchedule(parsed.rooms, null);
+    }
+  }, [cubeRaw, qg, selectedDate]);
+
+  const finishBuildingSchedule = useCallback((roomsIn, orChoice) => {
+    const assigned = qg ? buildAssignments(roomsIn, qg, orChoice) : roomsIn;
     const history = getAnesthetistLocationCounts();
     const ctResult = qg ? buildCareTeams(assigned, qg, history) : { rooms: assigned, careTeams: [], floats: [], available: [] };
     setRooms(ctResult.rooms);
     setCareTeamResult(ctResult);
-    setSchedLoaded(true);
-    setDateMismatch(selectedDate && parsed.totalParsed === 0);
-  }, [cubeRaw, qg, selectedDate]);
+    setOrCallChoice(orChoice);
+  }, [qg]);
+
+  const handleORCallConfirm = useCallback((choice) => {
+    setShowORCallPrompt(false);
+    if (qg?.ORCall && selectedDate) {
+      saveORCallChoice(qg.ORCall, selectedDate, choice);
+    }
+    finishBuildingSchedule(pendingRooms, choice);
+  }, [qg, selectedDate, pendingRooms, finishBuildingSchedule]);
+
+  const handleORCallSkip = useCallback(() => {
+    setShowORCallPrompt(false);
+    finishBuildingSchedule(pendingRooms, null);
+  }, [pendingRooms, finishBuildingSchedule]);
 
   const updateAssignment = useCallback((room, provider) => {
     setRooms(prev => prev.map(r => r.room === room ? { ...r, assignedProvider: provider } : r));
@@ -345,6 +373,16 @@ export default function App() {
           </div>
         )}
 
+        {/* OR CALL PROMPT MODAL */}
+        {showORCallPrompt && qg?.ORCall && (
+          <ORCallPrompt
+            orCallProvider={qg.ORCall}
+            rooms={pendingRooms || []}
+            onConfirm={handleORCallConfirm}
+            onSkip={handleORCallSkip}
+          />
+        )}
+
         {/* ASSIGNMENTS */}
         {tab === 'assign' && (
           <div>
@@ -377,6 +415,11 @@ export default function App() {
                   {careTeamResult.available?.length > 0 && (
                     <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'8px 12px'}}>
                       <div style={{fontSize:'10px',color:'var(--text-muted)',fontWeight:'600',letterSpacing:'1px',marginBottom:'3px'}}>AVAILABLE</div>
+                      {orCallChoice?.type === 'available' && qg?.ORCall && (
+                        <div style={{fontSize:'11px',color:'#f97316',marginBottom:'2px'}}>
+                          {qg.ORCall.split(',')[0]} — 1st Available <span style={{fontSize:'9px',letterSpacing:'1px'}}>[CHOICE]</span>
+                        </div>
+                      )}
                       {careTeamResult.available.map(p => (
                         <div key={p.name} style={{fontSize:'11px',color:'var(--text-secondary)'}}>{p.label}: {p.name.split(',')[0]}</div>
                       ))}
@@ -428,6 +471,7 @@ export default function App() {
                         <span className="room-name">{room.room}</span>
                         <span className="room-acuity" style={{color:ac}}>{room.acuity?.toUpperCase()}</span>
                         {room.blockRequired && <span className="badge-block">BLOCK</span>}
+                        {room.isORCallChoice && <span style={{fontSize:'9px',color:'#f97316',marginLeft:'6px',fontWeight:'700',letterSpacing:'1px'}}>CHOICE</span>}
                       </div>
                       <span className="room-count">{room.caseCount}c</span>
                     </div>

@@ -335,13 +335,44 @@ export function cardiacDecisionTree(rooms, cvCallMD, backupCVMD) {
   return result;
 }
 
-export function buildAssignments(rooms, qg) {
+export function buildAssignments(rooms, qg, orCallChoice) {
   if (!rooms.length||!qg?.workingMDs?.length) return rooms;
   let result=rooms.map(r=>({...r}));
   const used=new Set();
   result=cardiacDecisionTree(result,qg.CardiacCall||qg.ORCall,qg.BackupCV);
   result.forEach(r=>{if(r.assignedProvider)used.add(r.assignedProvider);});
-  const order=[...qg.workingMDs.filter(p=>p.role==='OR Call (#1)'),...qg.workingMDs.filter(p=>p.role==='Locum'),...qg.workingMDs.filter(p=>p.role==='Back Up Call (#2)'),...qg.workingMDs.filter(p=>p.rankNum>=3&&p.rankNum<50).sort((a,b)=>a.rankNum-b.rankNum),...qg.workingMDs.filter(p=>p.role==='7/8 Hr Shift')];
+
+  // Apply OR Call choice first if provided
+  if (orCallChoice && qg.ORCall) {
+    if (orCallChoice.type === 'available') {
+      // OR Call wants to be available — mark them used so they don't get auto-assigned
+      // They'll appear as 1st Available in the care team summary
+      used.add(qg.ORCall);
+    } else if (orCallChoice.type === 'room' && orCallChoice.room) {
+      const idx = result.findIndex(r => r.room === orCallChoice.room);
+      if (idx >= 0 && !result[idx].assignedProvider) {
+        result[idx] = {
+          ...result[idx],
+          assignedProvider: qg.ORCall,
+          isORCallChoice: true,
+          choiceLabel: 'CHOICE',
+        };
+        used.add(qg.ORCall);
+      }
+    }
+  }
+
+  // Assignment order per scheduling doc:
+  // CV Call → Backup CV → OR Call → Locums → Backup Call (#2) → Rank #3+
+  const order = [
+    ...qg.workingMDs.filter(p => p.role === 'Cardiac Call (CV)'),
+    ...qg.workingMDs.filter(p => p.role === 'Backup CV'),
+    ...qg.workingMDs.filter(p => p.role === 'OR Call (#1)'),
+    ...qg.workingMDs.filter(p => p.role === 'Locum'),
+    ...qg.workingMDs.filter(p => p.role === 'Back Up Call (#2)'),
+    ...qg.workingMDs.filter(p => p.rankNum >= 3 && p.rankNum < 50).sort((a,b) => a.rankNum - b.rankNum),
+    ...qg.workingMDs.filter(p => p.role === '7/8 Hr Shift'),
+  ];
   const blockOrder=['Nielson, Mark','Lambert','Powell, Jason','Pipito, Nicholas A','Dodwani','Pond, William'];
   for (const room of result) { if (room.assignedProvider||!room.blockRequired) continue; for (const name of blockOrder) { const p=order.find(p=>p.name===name&&!used.has(p.name)); if(p){room.assignedProvider=p.name;used.add(p.name);break;} } }
   for (const room of result) { if (room.assignedProvider||!room.isEndo) continue; const brand=order.find(p=>p.name==='Brand, David L'&&!used.has(p.name)); if(brand){room.assignedProvider=brand.name;used.add(brand.name);} }

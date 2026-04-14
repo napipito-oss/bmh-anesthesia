@@ -149,11 +149,24 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}) {
   let remainingCTSlots = maxCTRooms;
   let remainingRatios = [...ratios];
 
-  // ── STEP 5: Get available MDs for care teams ─────────────────
+  // ── STEP 5: Get available MDs in correct assignment order ────
+  // Order: CV Call → Backup CV → OR Call → Locums → Backup Call → Rank 3+
   const workingMDs = qg.workingMDs || [];
-  const availableMDs = workingMDs.filter(p =>
+
+  // OR Call is handled separately via orCallChoice — remove from general pool
+  const orCallMD = workingMDs.find(p => p.role === 'OR Call (#1)');
+
+  const availableMDs = [
+    ...workingMDs.filter(p => p.role === 'Cardiac Call (CV)'),
+    ...workingMDs.filter(p => p.role === 'Backup CV'),
+    // OR Call excluded here — handled by orCallChoice
+    ...workingMDs.filter(p => p.role === 'Locum'),
+    ...workingMDs.filter(p => p.role === 'Back Up Call (#2)'),
+    ...workingMDs.filter(p => p.rankNum >= 3 && p.rankNum < 50).sort((a,b) => a.rankNum - b.rankNum),
+    ...workingMDs.filter(p => p.role === '7/8 Hr Shift'),
+  ].filter(p =>
     !preAssigned.find(r => r.assignedProvider === p.name) &&
-    p.role !== '7/8 Hr Shift' // Brand handled separately
+    !globalUsed.has(p.name)
   );
 
   // Brand first — always Endo care team
