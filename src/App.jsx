@@ -1,8 +1,11 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { PROVIDERS, ANESTHETIST_SHIFTS, LATE_STAY_PRIORITY } from './data/providers.js';
 import { SURGEON_BLOCKS } from './data/surgeons.js';
 import { parseQGenda, parseCubeData, buildAssignments } from './utils/parsers.js';
+import { buildCareTeams, CARE_TEAM_COLORS } from './utils/careTeams.js';
+import { getAnesthetistLocationCounts, saveFullDayHistory } from './utils/history.js';
 import { callAI } from './utils/api.js';
+import HistoryTab from './components/HistoryTab.jsx';
 import './App.css';
 
 // ── CONSTANTS ────────────────────────────────────────────────
@@ -36,6 +39,7 @@ const TABS = [
   { id: 'handoff', label: '2PM HANDOFF' },
   { id: 'providers', label: 'PROVIDER INTEL' },
   { id: 'surgeons', label: 'SURGEON DB' },
+  { id: 'history', label: 'HISTORY' },
   { id: 'ai', label: 'AI ASSISTANT' },
 ];
 
@@ -78,18 +82,23 @@ export default function App() {
   }, [qgRaw, rooms, selectedDate]);
 
   const [dateMismatch, setDateMismatch] = useState(false);
+  const [careTeamResult, setCareTeamResult] = useState(null);
+
+  // Load anesthetist history on mount
+  useEffect(() => {
+    // History loaded lazily when needed by care team engine
+  }, []);
 
   const loadSchedule = useCallback(() => {
     const parsed = parseCubeData(cubeRaw, selectedDate);
     const assigned = qg ? buildAssignments(parsed.rooms, qg) : parsed.rooms;
-    setRooms(assigned);
+    // Run care team engine
+    const history = getAnesthetistLocationCounts();
+    const ctResult = qg ? buildCareTeams(assigned, qg, history) : { rooms: assigned, careTeams: [], floats: [], available: [] };
+    setRooms(ctResult.rooms);
+    setCareTeamResult(ctResult);
     setSchedLoaded(true);
-    // Check if the date we asked for actually had cases
-    if (selectedDate && parsed.totalParsed === 0) {
-      setDateMismatch(true);
-    } else {
-      setDateMismatch(false);
-    }
+    setDateMismatch(selectedDate && parsed.totalParsed === 0);
   }, [cubeRaw, qg, selectedDate]);
 
   const updateAssignment = useCallback((room, provider) => {
@@ -333,39 +342,123 @@ export default function App() {
               <div className="section-label">ROOM ASSIGNMENTS</div>
               {(!schedLoaded||!qgLoaded) && <div className="warn-text">Load QGenda and schedule on Daily Board first</div>}
             </div>
+
+            {/* Care team summary */}
+            {careTeamResult?.careTeams?.length > 0 && (
+              <div style={{marginBottom:'16px'}}>
+                <div className="section-label">CARE TEAM SUMMARY</div>
+                <div style={{display:'flex',flexWrap:'wrap',gap:'8px',marginBottom:'8px'}}>
+                  {careTeamResult.careTeams.map((ct, i) => (
+                    <div key={i} style={{background:ct.color.bg,border:`1px solid ${ct.color.border}`,borderRadius:'var(--radius)',padding:'8px 12px',minWidth:'180px'}}>
+                      <div style={{fontSize:'10px',color:ct.color.text,fontWeight:'600',letterSpacing:'1px',marginBottom:'3px'}}>{ct.color.label} — {ct.ratio}</div>
+                      <div style={{fontSize:'11px',color:'var(--text-primary)'}}>{ct.md.split(',')[0]}</div>
+                      <div style={{fontSize:'10px',color:'var(--text-secondary)',marginTop:'2px'}}>Rooms: {ct.rooms.join(', ')}</div>
+                      <div style={{fontSize:'10px',color:'var(--text-muted)',marginTop:'2px'}}>AAs: {ct.anesthetists.join(', ') || '—'}</div>
+                    </div>
+                  ))}
+                  {careTeamResult.floats?.length > 0 && (
+                    <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'8px 12px'}}>
+                      <div style={{fontSize:'10px',color:'var(--accent-amber)',fontWeight:'600',letterSpacing:'1px',marginBottom:'3px'}}>FLOAT</div>
+                      {careTeamResult.floats.map(f => (
+                        <div key={f.name} style={{fontSize:'11px',color:'var(--text-primary)'}}>{f.name}</div>
+                      ))}
+                    </div>
+                  )}
+                  {careTeamResult.available?.length > 0 && (
+                    <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'8px 12px'}}>
+                      <div style={{fontSize:'10px',color:'var(--text-muted)',fontWeight:'600',letterSpacing:'1px',marginBottom:'3px'}}>AVAILABLE</div>
+                      {careTeamResult.available.map(p => (
+                        <div key={p.name} style={{fontSize:'11px',color:'var(--text-secondary)'}}>{p.label}: {p.name.split(',')[0]}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {critFlags.length>0 && <div style={{marginBottom:'12px'}}>{critFlags.map((f,i)=><div key={i} className="flag-crit">⚠ {f.room}: {f.msg}</div>)}</div>}
+
+            {/* Save today's assignments to history */}
+            {schedLoaded && rooms.length > 0 && selectedDate && (
+              <div style={{marginBottom:'12px'}}>
+                <button className="btn" style={{fontSize:'9px',padding:'6px 14px',background:'var(--bg-elevated)',color:'var(--accent-green)',border:'1px solid var(--accent-green)'}}
+                  onClick={() => { saveFullDayHistory(selectedDate, rooms); alert('Assignments saved to history.'); }}>
+                  SAVE TO HISTORY
+                </button>
+              </div>
+            )}
+
             <div className="room-grid">
               {rooms.map(room => {
                 const ac = ACUITY_COLORS[room.acuity]||'#475569';
                 const conflict = room.assignedProvider && room.avoidProviders?.includes(room.assignedProvider);
                 const isExp = expanded === `room-${room.room}`;
+                const ctColor = room.isCareTeam && room.careTeamId !== undefined
+                  ? CARE_TEAM_COLORS[room.careTeamId % CARE_TEAM_COLORS.length]
+                  : null;
+
                 return (
                   <div key={room.room} className="card room-card"
-                    style={{borderLeft:`3px solid ${ac}`,borderColor:conflict?'#ef4444':'var(--border)'}}
+                    style={{
+                      borderLeft:`3px solid ${ctColor ? ctColor.border : ac}`,
+                      borderColor: conflict ? '#ef4444' : ctColor ? ctColor.border : 'var(--border)',
+                      background: ctColor ? ctColor.bg : 'var(--bg-surface)',
+                    }}
                     onClick={()=>setExpanded(isExp?null:`room-${room.room}`)}>
+
+                    {/* Care team label badge */}
+                    {room.isCareTeam && room.careTeamLabel && (
+                      <div style={{fontSize:'9px',color:ctColor?.text,letterSpacing:'1px',marginBottom:'5px',fontWeight:'600'}}>
+                        {room.careTeamLabel}
+                      </div>
+                    )}
+
                     <div className="room-header">
                       <div>
                         <span className="room-name">{room.room}</span>
                         <span className="room-acuity" style={{color:ac}}>{room.acuity?.toUpperCase()}</span>
                         {room.blockRequired && <span className="badge-block">BLOCK</span>}
-                        {room.blockPossible && !room.blockRequired && <span className="badge-possible">block?</span>}
                       </div>
                       <span className="room-count">{room.caseCount}c</span>
                     </div>
+
                     <div className="room-procedure">{room.cases?.map(c=>c.procedure).filter(Boolean).join(' → ') || ''}</div>
                     <div className="room-surgeon">{room.surgeons?.join(', ')}</div>
-                    <select className="room-select" style={{borderColor:conflict?'#ef4444':'var(--border)'}}
-                      value={room.assignedProvider||''} onClick={e=>e.stopPropagation()}
-                      onChange={e=>{e.stopPropagation();updateAssignment(room.room,e.target.value);}}>
-                      <option value="">— Unassigned —</option>
-                      {qg?.workingMDs?.map(p=>(
-                        <option key={p.name} value={p.name}>
-                          {room.preferredProviders?.includes(p.name)?'★ ':room.avoidProviders?.includes(p.name)?'⚠ ':''}{p.name} ({p.role})
-                        </option>
-                      ))}
-                    </select>
+
+                    {/* Attending MD */}
+                    <div style={{marginBottom:'5px'}}>
+                      <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>ATTENDING MD</div>
+                      <select className="room-select" style={{borderColor:conflict?'#ef4444':ctColor?ctColor.border:'var(--border)'}}
+                        value={room.assignedProvider||''} onClick={e=>e.stopPropagation()}
+                        onChange={e=>{e.stopPropagation();updateAssignment(room.room,e.target.value);}}>
+                        <option value="">— Unassigned —</option>
+                        {qg?.workingMDs?.map(p=>(
+                          <option key={p.name} value={p.name}>
+                            {room.preferredProviders?.includes(p.name)?'★ ':room.avoidProviders?.includes(p.name)?'⚠ ':''}{p.name} ({p.role})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Anesthetist */}
+                    <div>
+                      <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>ANESTHETIST</div>
+                      <div style={{
+                        background:'var(--bg-base)',
+                        border:`1px solid ${ctColor?ctColor.border:'var(--border)'}`,
+                        borderRadius:'var(--radius-sm)',
+                        padding:'5px 8px',
+                        fontSize:'11px',
+                        color: room.anesthetist ? (ctColor?ctColor.text:'var(--text-primary)') : 'var(--text-faint)',
+                        fontStyle: room.anesthetist ? 'normal' : 'italic',
+                      }}>
+                        {room.anesthetist || 'NONE'}
+                      </div>
+                    </div>
+
                     {conflict && <div className="flag-crit" style={{marginTop:'6px'}}>⚠ Conflict — {room.assignedProvider} flagged for this room</div>}
                     {room.cardiacNote && <div className="flag-info" style={{marginTop:'6px'}}>{room.cardiacNote}</div>}
+
                     {isExp && (
                       <div className="room-detail">
                         {room.preferredProviders?.length>0 && <div className="detail-preferred">★ Preferred: {room.preferredProviders.join(', ')}</div>}
@@ -539,6 +632,14 @@ export default function App() {
                   );
                 })}
             </div>
+          </div>
+        )}
+
+        {/* HISTORY */}
+        {tab === 'history' && (
+          <div>
+            <div className="section-label">ASSIGNMENT HISTORY</div>
+            <HistoryTab qg={qg} />
           </div>
         )}
 
