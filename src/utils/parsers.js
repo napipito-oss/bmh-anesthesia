@@ -103,15 +103,16 @@ export function parseQGenda(raw, forceDateStr) {
     const parts = line.split('\t').map(p => p.trim());
     const roleRaw = parts[0]?.trim() || '';
     const name = parts[1]?.trim() || '';
-    const rl = roleRaw.toLowerCase();
+    const rl = roleRaw.toLowerCase().trim();
 
-    // Detect day headers (e.g. "Thursday", "April 9, 2026")
-    const isDayName = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].some(d => rl.trim() === d);
+    // Day header detection MUST come before name checks
+    // QGenda lines: "Thursday" or "Thursday	April 9, 2026"
+    const isDayName = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].includes(rl);
     const isDateLine = /^[a-z]+ \d+, \d{4}$/i.test(roleRaw.trim());
 
     if (isDayName) {
       if (forceDateStr) {
-        inTargetDay = (rl.trim() === targetDayName);
+        inTargetDay = (rl === targetDayName);
         if (inTargetDay) foundTargetDay = true;
       }
       continue;
