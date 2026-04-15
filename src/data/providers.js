@@ -229,6 +229,7 @@ export const PROVIDERS = {
     notes:"Near retirement. Can do most cases but not preferred in any specific room. No blocks, slow between cases. Not a fast-turnover provider.",
     flags:["Slow turnover — avoid fast rooms","No blocks","Near retirement — honor pace"]
   },
+  "Shepherd": {
     type:"MD", employed:false, locum:true, fullName:"Shepherd, Meredith",
     strengths:["Generalist"],
     avoidances:["Care teams (prefers solo)"],
