@@ -126,7 +126,6 @@ export function parseQGenda(raw, forceDateStr) {
     if (!roleRaw || !name || name.length < 2) continue;
 
     const rankM = rl.match(/rank #(\d+)/);
-    const rankM = rl.match(/rank #(\d+)/);
     if (rankM) {
       const rn = parseInt(rankM[1]);
       if (!result.Ranks[rn]) result.Ranks[rn] = [];
