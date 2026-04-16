@@ -3,7 +3,34 @@
 // Implements BMH scheduling logic from Coordination Logic doc
 // ─────────────────────────────────────────────────────────────
 
-// MDs who are comfortable with / prefer care teams
+// Geographic building classification
+// Used to enforce care team proximity rules
+export function getRoomBuilding(room) {
+  const r = (room || '').toLowerCase();
+  if (r.includes('boos')) return 'BOOS';
+  if (r.includes('rir') || r.includes('ir ') || r.includes('ir2') || r.includes('ir1')) return 'IR';
+  if (r.includes('endo') || r.includes('gi ')) return 'ENDO_FLOOR';
+  if (r.includes('cl ') || r.includes('cath') || r.includes('yanes') || r.includes('ep lab')) return 'CATH_FLOOR';
+  return 'MAIN_OR_FLOOR'; // OR 1-10, default
+}
+
+// Check if two buildings can share a care team
+// Returns: 'yes' | 'ok' | 'no'
+export function careTeamCompatible(buildingA, buildingB) {
+  if (buildingA === buildingB) return 'yes';
+  const combo = [buildingA, buildingB].sort().join('+');
+  // These combos are always NO
+  if (combo.includes('BOOS')) return 'no'; // BOOS + anything else = never
+  // IR + anything = not preferred
+  if (combo.includes('IR')) return 'ok';
+  // Main OR + Endo = acceptable
+  if (combo === 'ENDO_FLOOR+MAIN_OR_FLOOR') return 'yes';
+  // Main OR + Cath = not preferred but ok
+  if (combo === 'CATH_FLOOR+MAIN_OR_FLOOR') return 'ok';
+  // Cath + Endo = not preferred
+  if (combo === 'CATH_FLOOR+ENDO_FLOOR') return 'ok';
+  return 'ok';
+}
 export const CARE_TEAM_COMFORTABLE = [
   'Wu, Jennifer',
   'Kuraganti, Manjusha',
@@ -135,10 +162,15 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}) {
   const mainRooms = unassignedRooms.filter(r => !r.isEndo && !r.isCardiac && !r.isCathEP);
 
   // ── STEP 3: Score rooms for care team suitability ───────────
-  const scoredMain = mainRooms.map(r => ({
-    ...r,
-    ctScore: roomCareTeamSuitability(r) === 'good' ? 2 : roomCareTeamSuitability(r) === 'ok' ? 1 : 0,
-  })).sort((a, b) => b.ctScore - a.ctScore);
+  const scoredMain = mainRooms.map(r => {
+    const building = getRoomBuilding(r.room);
+    const geo = roomCareTeamSuitability(r);
+    return {
+      ...r,
+      building,
+      ctScore: geo === 'good' ? 2 : geo === 'ok' ? 1 : 0,
+    };
+  }).sort((a, b) => b.ctScore - a.ctScore);
 
   // ── STEP 4: Determine how many rooms get care teams ─────────
   // Brand always gets Endo first
@@ -335,32 +367,45 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}) {
   };
 }
 
-// Pick rooms with staggered starts for care team assignment
+// Pick rooms for a care team — enforce geographic constraints
 function pickStaggeredRooms(roomPool, count) {
   if (roomPool.length <= count) return roomPool.slice(0, count);
 
-  // Sort by start time to identify stagger opportunities
-  const withTimes = roomPool.map(r => {
-    const timeStr = r.cases?.[0]?.encounterType || '';
-    return { ...r, sortTime: r.startTime || '9999' };
-  }).sort((a, b) => a.sortTime.localeCompare(b.sortTime));
+  const withTimes = roomPool.map(r => ({
+    ...r,
+    building: getRoomBuilding(r.room),
+    sortTime: r.startTime || '9999',
+  })).sort((a, b) => a.sortTime.localeCompare(b.sortTime));
 
-  // Try to pick rooms with different start times (staggered)
+  // Try to pick rooms that are geographically compatible
   const picked = [];
   const usedTimes = new Set();
+  let dominantBuilding = null;
+
   for (const room of withTimes) {
     if (picked.length >= count) break;
-    const timeKey = room.startTime?.split(' ')[1] || 'unknown';
+
+    // Check geographic compatibility with already-picked rooms
+    if (dominantBuilding) {
+      const compat = careTeamCompatible(dominantBuilding, room.building);
+      if (compat === 'no') continue; // Hard skip — incompatible buildings
+    }
+
+    const timeKey = room.sortTime?.split(' ')[1] || 'unknown';
     if (!usedTimes.has(timeKey) || picked.length < count) {
       picked.push(room);
       usedTimes.add(timeKey);
+      if (!dominantBuilding) dominantBuilding = room.building;
     }
   }
 
-  // Fill remaining if needed
+  // Fill if needed with compatible rooms
   for (const room of withTimes) {
     if (picked.length >= count) break;
-    if (!picked.find(p => p.room === room.room)) picked.push(room);
+    if (!picked.find(p => p.room === room.room)) {
+      const compat = dominantBuilding ? careTeamCompatible(dominantBuilding, room.building) : 'yes';
+      if (compat !== 'no') picked.push(room);
+    }
   }
 
   return picked.slice(0, count);

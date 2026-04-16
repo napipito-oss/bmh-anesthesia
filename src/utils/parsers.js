@@ -37,6 +37,10 @@ function needsAnesthesia(procedure, surgeon, room) {
   if (proc.includes('loop recorder'))
     return { needs: false, reason: 'Loop recorder — no anesthesia (all surgeons)' };
 
+  // PFO closure — no anesthesia
+  if (proc.includes('pfo closure') || proc.includes('pfo repair') || proc.includes('patent foramen ovale'))
+    return { needs: false, reason: 'PFO closure — no anesthesia' };
+
   if (proc.includes('tee') || proc.includes('transesophageal'))
     return { needs: true, reason: 'TEE — always needs anesthesia', cardiac: true };
 
