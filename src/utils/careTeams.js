@@ -307,9 +307,9 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   // at least 2 anesthetists remain unused.
   // Block-capable MD required if any room needs peripheral nerve blocks.
   const remainingAnests = anesthetistPool.filter(a => !usedAnesthetists.has(a.name));
-  const bооsCareTeamPossible = boosRooms.length >= 2 && remainingAnests.length >= 2;
+  const boosCareTeamPossible = boosRooms.length >= 2 && remainingAnests.length >= 2;
  
-  if (bооsCareTeamPossible) {
+  if (boosCareTeamPossible) {
     // Pick the best MD for BOOS — block-capable if needed
     const boosNeedsBlock = boosRooms.some(r => boosNeedsPeripheralBlock(r));
     const remainingMDsForBoos = availableMDs.filter(p => !usedMDs.has(p.name));
