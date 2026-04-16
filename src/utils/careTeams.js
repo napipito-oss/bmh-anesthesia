@@ -119,20 +119,16 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}) {
   const activeAnesthetists = (qg.Anesthetists || []).filter(a => !a.isAdmin && !a.isOff);
   const anesthetistCount = activeAnesthetists.length;
 
-  // Build a set of ALL names already committed anywhere (MDs + anesthetists)
-  // Nobody can appear in two places. This is a hard rule.
-  const globalUsed = new Set();
-  preAssigned.forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
-  // AA backup call names are working as anesthetists — they're in the pool, not MD pool
-  // (already handled by parser — they won't appear in workingMDs)
-
   const config = getCareTeamConfig(anesthetistCount);
   const { careTeamRooms: maxCTRooms, mdsNeeded, ratios, floats: floatCount } = config;
 
   // ── STEP 1: Pre-assign rooms that CANNOT be care teams ──────
-  // These are already handled by cardiac decision tree + block assignments
   const preAssigned = rooms.filter(r => r.assignedProvider && (r.isCardiac || r.isCathEP));
   const unassignedRooms = rooms.filter(r => !preAssigned.find(p => p.room === r.room));
+
+  // Build globalUsed AFTER preAssigned is defined
+  const globalUsed = new Set();
+  preAssigned.forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
 
   // ── STEP 2: Separate Endo rooms ─────────────────────────────
   const endoRooms = unassignedRooms.filter(r => r.isEndo);
