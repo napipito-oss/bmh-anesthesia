@@ -453,7 +453,9 @@ export function parseCubeData(raw, forceDateStr) {
  
   const roomMap = {};
   for (const c of needsCoverage) {
-    const key = c.room || `${c.area}-unknown`;
+    // Rooms with no matched location get merged into Add-On Room
+    // rather than appearing as "[area]-unknown"
+    const key = c.room || 'BMH OR Add-On Room';
     if (!roomMap[key]) roomMap[key] = [];
     roomMap[key].push(c);
   }
