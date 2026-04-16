@@ -709,18 +709,20 @@ export default function App() {
 
                 // ── Phantom room ──────────────────────────────────────
                 if (room.isPhantom) {
+                  // Phantom endo add-on slot — styled as Care Team 1 (green) since it belongs to Brand
+                  const phantomCtColor = CARE_TEAM_COLORS[0];
                   return (
                     <div key={room.room} className="card room-card"
-                      style={{borderLeft:'3px solid #f59e0b',borderColor:'#f59e0b',background:'#1a1400',opacity:0.85}}>
-                      {room.careTeamLabel && <div style={{fontSize:'9px',color:'#fbbf24',letterSpacing:'1px',marginBottom:'5px',fontWeight:'600'}}>{room.careTeamLabel}</div>}
+                      style={{borderLeft:`3px solid ${phantomCtColor.border}`,borderColor:phantomCtColor.border,background:phantomCtColor.bg,opacity:0.9}}>
+                      {room.careTeamLabel && <div style={{fontSize:'9px',color:phantomCtColor.text,letterSpacing:'1px',marginBottom:'5px',fontWeight:'600'}}>{room.careTeamLabel}</div>}
                       <div className="room-header">
-                        <span className="room-name" style={{color:'#fbbf24'}}>{room.room}</span>
-                        <span style={{fontSize:'9px',color:'#f59e0b',letterSpacing:'1px',fontWeight:'700'}}>RESERVED</span>
+                        <span className="room-name" style={{color:phantomCtColor.text}}>{room.room}</span>
+                        <span style={{fontSize:'9px',color:phantomCtColor.border,letterSpacing:'1px',fontWeight:'700'}}>ADD-ON SLOT</span>
                       </div>
-                      <div style={{fontSize:'10px',color:'var(--text-muted)',marginTop:'4px',fontStyle:'italic'}}>No cases booked — reserved for inpatient add-ons per Resource Structure</div>
+                      <div style={{fontSize:'10px',color:'var(--text-secondary)',marginTop:'4px',fontStyle:'italic'}}>No cases booked — reserved for inpatient add-ons per Resource Structure</div>
                       <div style={{marginTop:'8px'}}>
-                        <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>ANESTHETIST RESERVED</div>
-                        <div style={{background:'var(--bg-base)',border:'1px solid #f59e0b',borderRadius:'var(--radius-sm)',padding:'5px 8px',fontSize:'11px',color:'#fbbf24'}}>{room.anesthetist || '—'}</div>
+                        <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>ANESTHETIST</div>
+                        <div style={{background:'var(--bg-base)',border:`1px solid ${phantomCtColor.border}`,borderRadius:'var(--radius-sm)',padding:'5px 8px',fontSize:'11px',color:phantomCtColor.text}}>{room.anesthetist || '—'}</div>
                       </div>
                     </div>
                   );
