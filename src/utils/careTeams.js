@@ -123,11 +123,13 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   // soloUsed = used set for the final solo fill pass (ALL assigned providers,
   //   prevents the solo pass from re-assigning MDs already placed by buildAssignments).
   const preAssigned     = rooms.filter(r => r.assignedProvider && (r.isCardiac || r.isCathEP));
-  const unassignedRooms = rooms.filter(r => !r.assignedProvider && !r.isPhantom);
+  const unassignedRooms = rooms.filter(r => !preAssigned.find(p => p.room === r.room) && !r.isORCallChoice);
  
-  // ctUsed: only cardiac/cath providers — allows care team formation to see all other MDs
+  // ctUsed: cardiac/cath providers + OR Call choice — excludes them from care team formation
   const globalUsed = new Set();
   preAssigned.forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
+  // OR Call choice room is locked — exclude that provider from care team MD pool too
+  rooms.filter(r => r.isORCallChoice).forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
  
   // soloUsed: ALL already-assigned providers — prevents solo pass double-assignment
   const soloUsed = new Set();
@@ -448,3 +450,4 @@ function sortAnesthetistsByVariety(anesthetists, area, history) {
     return aCount - bCount;
   });
 }
+ 
