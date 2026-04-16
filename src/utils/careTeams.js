@@ -1,15 +1,13 @@
 // ─────────────────────────────────────────────────────────────
-// CARE TEAM ENGINE — v3.1 (Chunk 3 corrected)
-// BOOS rules:
-//   - Max 1:2 (only 2 ORs exist)
-//   - Only gets a care team if anesthetists remain after
-//     Main OR + Endo are optimally covered
-//   - Never mixed into a Main OR care team
-//   - Block-capable MD required if peripheral nerve blocks needed
-//     (interscalene, PENG, adductor canal, popliteal/sciatic)
-//   - Spinals do not require regional-capable MD
-// IR rules:
-//   - Always solo, never care team
+// CARE TEAM ENGINE — v3.2
+// Based on v3.1 (last confirmed working state)
+// Changes from v3.1:
+//   - unassignedRooms excludes isORCallChoice rooms (Eskew fix)
+//   - globalUsed includes OR Call choice provider
+//   - remainingMDs in solo pass sorted by priority order
+//     (Locums → Back Up Call → Rank 3+) so Watkins/Siddiqui
+//     are assigned before Pipito, Pipito before Raghove
+//   - Watkins added to CARE_TEAM_COMFORTABLE
 // ─────────────────────────────────────────────────────────────
 import { classifyRoom } from './parsers.js';
  
@@ -17,13 +15,11 @@ export function getRoomBuilding(room) {
   return classifyRoom(room).building;
 }
  
-// Check if two buildings can share a care team
-// Returns: 'yes' | 'ok' | 'no'
 export function careTeamCompatible(buildingA, buildingB) {
   if (buildingA === buildingB) return 'yes';
   const combo = [buildingA, buildingB].sort().join('+');
-  if (combo.includes('BOOS'))               return 'no';  // hard — BOOS never mixes
-  if (combo.includes('IR'))                 return 'no';  // hard — IR always solo
+  if (combo.includes('BOOS'))               return 'no';
+  if (combo.includes('IR'))                 return 'no';
   if (combo === 'ENDO_FLOOR+MAIN_OR_FLOOR') return 'yes';
   if (combo === 'CATH_FLOOR+MAIN_OR_FLOOR') return 'ok';
   if (combo === 'CATH_FLOOR+ENDO_FLOOR')    return 'ok';
@@ -60,7 +56,7 @@ export function getCareTeamConfig(anesthetistCount) {
   if (CARE_TEAM_TABLE[anesthetistCount]) return CARE_TEAM_TABLE[anesthetistCount];
   const mdsNeeded = Math.floor(anesthetistCount / 3);
   const remainder = anesthetistCount % 3;
-  const ratios = Array(mdsNeeded).fill(3);
+  const ratios    = Array(mdsNeeded).fill(3);
   if (remainder > 0) ratios.push(remainder);
   return { careTeamRooms: anesthetistCount, mdsNeeded: ratios.length, ratios, floats: 0 };
 }
@@ -73,6 +69,7 @@ export function roomCareTeamSuitability(room) {
   if (room.acuity === 'high')                       return 'ok';
   if (room.isEndo)                                  return 'good';
   if (room.isFastTurnover)                          return 'good';
+  if (room.isBOOS)                                  return 'ok';
   if (room.isRobotic)                               return 'ok';
   return 'ok';
 }
@@ -86,27 +83,21 @@ export const CARE_TEAM_COLORS = [
   { bg: '#0f2a2a', border: '#14b8a6', text: '#2dd4bf', label: 'Care Team 6' },
 ];
  
-// ── Detect if a BOOS room needs a peripheral nerve block MD ──
-// Spinals do NOT require regional-capable — only peripheral blocks do
 const PERIPHERAL_BLOCK_KEYWORDS = [
-  'interscalene', 'peng', 'adductor canal', 'popliteal', 'sciatic',
-  'femoral nerve', 'fascia iliaca', 'infraclavicular', 'axillary block',
-  'supraclavicular', 'wrist block', 'ankle block',
+  'interscalene','peng','adductor canal','popliteal','sciatic',
+  'femoral nerve','fascia iliaca','infraclavicular','axillary block',
+  'supraclavicular','wrist block','ankle block',
 ];
+const REGIONAL_CAPABLE = ['Nielson, Mark','Lambert','Powell, Jason','Pipito, Nicholas A','Dodwani','Pond, William'];
  
 function boosNeedsPeripheralBlock(room) {
   if (!room?.cases?.length) return room?.blockRequired || false;
   const allProcs = room.cases.map(c => (c.procedure || '').toLowerCase()).join(' ');
-  // If it's just a spinal, regional-capable not required
   if (allProcs.includes('spinal') && !PERIPHERAL_BLOCK_KEYWORDS.some(k => allProcs.includes(k)))
     return false;
   return PERIPHERAL_BLOCK_KEYWORDS.some(k => allProcs.includes(k)) || room.blockRequired;
 }
  
-const REGIONAL_CAPABLE = ['Nielson, Mark', 'Lambert', 'Powell, Jason', 'Pipito, Nicholas A', 'Dodwani', 'Pond, William'];
- 
-// ─────────────────────────────────────────────────────────────
-// MAIN CARE TEAM BUILDER
 // ─────────────────────────────────────────────────────────────
 export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStructure = {}) {
   if (!rooms?.length || !qg) return { rooms, careTeams: [], floats: [], available: [] };
@@ -117,27 +108,23 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   const { careTeamRooms: maxCTRooms, ratios, floats: floatCount } = config;
  
   // ── Pre-assigned rooms ──────────────────────────────────────
-  // preAssigned = cardiac/cath rooms (MD locked by decision tree).
-  // unassignedRooms = everything else (care teams form from these).
-  // ctUsed = used set for care team MD selection (cardiac/cath only).
-  // soloUsed = used set for the final solo fill pass (ALL assigned providers,
-  //   prevents the solo pass from re-assigning MDs already placed by buildAssignments).
-  const preAssigned     = rooms.filter(r => r.assignedProvider && (r.isCardiac || r.isCathEP));
-  const unassignedRooms = rooms.filter(r => !preAssigned.find(p => p.room === r.room) && !r.isORCallChoice);
+  const preAssigned = rooms.filter(r => r.assignedProvider && (r.isCardiac || r.isCathEP));
  
-  // ctUsed: cardiac/cath providers + OR Call choice — excludes them from care team formation
+  // unassignedRooms excludes cardiac/cath AND OR Call choice rooms
+  const unassignedRooms = rooms.filter(r =>
+    !preAssigned.find(p => p.room === r.room) && !r.isORCallChoice
+  );
+ 
+  // ctUsed: cardiac/cath + OR Call choice providers locked out of care team MD pool
   const globalUsed = new Set();
   preAssigned.forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
-  // OR Call choice room is locked — exclude that provider from care team MD pool too
   rooms.filter(r => r.isORCallChoice).forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
  
   // soloUsed: ALL already-assigned providers — prevents solo pass double-assignment
   const soloUsed = new Set();
   rooms.forEach(r => { if (r.assignedProvider) soloUsed.add(r.assignedProvider); });
  
-  // ── Hard geographic segregation ──────────────────────────────
-  // BOOS and IR are pulled out before care team formation begins.
-  // They are never in the pool that Main OR care teams draw from.
+  // ── Geographic segregation ────────────────────────────────────
   const endoRooms = unassignedRooms.filter(r => r.isEndo);
   const boosRooms = unassignedRooms.filter(r => r.isBOOS);
   const irRooms   = unassignedRooms.filter(r => r.isIR);
@@ -148,13 +135,15 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   const scoredMain = mainRooms.map(r => ({
     ...r,
     building: r.building || getRoomBuilding(r.room),
-    ctScore: roomCareTeamSuitability(r) === 'good' ? 2 :
-             roomCareTeamSuitability(r) === 'ok'   ? 1 : 0,
+    ctScore:  roomCareTeamSuitability(r) === 'good' ? 2 :
+              roomCareTeamSuitability(r) === 'ok'   ? 1 : 0,
   })).sort((a, b) => b.ctScore - a.ctScore);
  
   let remainingRatios = [...ratios];
  
   const workingMDs   = qg.workingMDs || [];
+ 
+  // availableMDs: priority order — Locums first, then Backup Call, then Rank 3+
   const availableMDs = [
     ...workingMDs.filter(p => p.role === 'Cardiac Call (CV)'),
     ...workingMDs.filter(p => p.role === 'Backup CV'),
@@ -175,8 +164,8 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   let anesthetistPool = activeAnesthetists.filter(a => !globalUsed.has(a.name));
   anesthetistPool = sortAnesthetistsByVariety(anesthetistPool, 'endo', anesthetistHistory);
  
-  // ── CARE TEAM A: Brand → Endo ────────────────────────────────
-  if (brandMD && endoRooms.length > 0) {
+  // ── Care Team A: Brand → Endo ─────────────────────────────────
+  if (brandMD && !usedMDs.has(brandMD.name) && endoRooms.length > 0) {
     const committedEndo = Math.min(Math.ceil(parseFloat(resourceStructure.endo) || 0), 3);
     const cappedRatio   = Math.min(Math.max(endoRooms.length, committedEndo), 3);
     const endoAnests    = anesthetistPool.splice(0, cappedRatio);
@@ -191,7 +180,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
       flags: [{ level: 'info', msg: 'Reserved for inpatient add-on — no cases booked yet' }],
       assignedProvider: brandMD.name,
       anesthetist: endoAnests[visibleRooms.length + i]?.name || null,
-      careTeamId: 0, careTeamLabel: 'Care Team 1 — Brand',
+      careTeamId: 0, careTeamLabel: `Care Team 1 — Brand 1:${cappedRatio}`,
       careTeamRatio: `1:${cappedRatio}`, caseStatus: 'Not Started',
       cardiacNote: '', blockRequired: false, blockPossible: false,
       preferredProviders: [], avoidProviders: [], manuallyAdded: false,
@@ -229,13 +218,10 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     phantomRooms.forEach(pr => rooms.push(pr));
   }
  
-  // ── CARE TEAMS B+: Main OR rooms ────────────────────────────
-  // BOOS and IR are not in scoredMain — they cannot leak in here.
-  // ctMDs = all available MDs in priority order (Locums → Back Up Call → Rank 3+)
-  // CARE_TEAM_COMFORTABLE only controls anesthetist assignment, not room assignment
-  // Every MD gets a room in QGenda priority order regardless of care team comfort
-  const ctMDs = availableMDs
-    .filter(p => !usedMDs.has(p.name));
+  // ── Care Teams B+: Main OR ────────────────────────────────────
+  // ctMDs preserves availableMDs priority order — no re-sorting
+  // CARE_TEAM_COMFORTABLE still controls whether anesthetists are assigned
+  const ctMDs = availableMDs.filter(p => !usedMDs.has(p.name) && CARE_TEAM_COMFORTABLE.includes(p.name));
  
   let ctIdx    = 1;
   let roomPool = [...scoredMain.filter(r => roomCareTeamSuitability(r) !== 'avoid')];
@@ -248,38 +234,28 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     const md = ctMDs.shift();
     if (!md || usedMDs.has(md.name)) continue;
  
-    // MDs who avoid care teams (e.g. Eskew) get one solo room, no anesthetist
-    const avoidsCT = CARE_TEAM_AVOID.includes(md.name);
-    const isCTComfy = !avoidsCT && CARE_TEAM_COMFORTABLE.includes(md.name);
-    const assignRatio = avoidsCT ? 1 : actualRatio;
- 
-    const ctRooms = pickStaggeredRooms(roomPool, assignRatio);
+    const ctRooms = pickStaggeredRooms(roomPool, actualRatio);
     if (ctRooms.length === 0) break;
  
     ctRooms.forEach(r => { roomPool = roomPool.filter(x => x.room !== r.room); });
  
-    // Only assign anesthetists if MD is care-team-comfortable
-    const anestCandidates = isCTComfy ? sortAnesthetistsByVariety(
+    const sortedAnests = sortAnesthetistsByVariety(
       anesthetistPool.filter(a => !usedAnesthetists.has(a.name)),
       'main', anesthetistHistory
-    ) : [];
-    const ctAnests = anestCandidates.slice(0, assignRatio);
+    );
+    const ctAnests = sortedAnests.splice(0, actualRatio);
     ctAnests.forEach(a => usedAnesthetists.add(a.name));
     anesthetistPool = anesthetistPool.filter(a => !usedAnesthetists.has(a.name));
  
     const color     = CARE_TEAM_COLORS[ctIdx % CARE_TEAM_COLORS.length];
-    const teamLabel = isCTComfy
-      ? `Care Team ${ctIdx + 1} — ${md.name.split(',')[0]} 1:${assignRatio}`
-      : null;
+    const teamLabel = `Care Team ${ctIdx + 1} — ${md.name.split(',')[0]} 1:${actualRatio}`;
  
-    if (isCTComfy) {
-      careTeams.push({
-        id: ctIdx, md: md.name, ratio: `1:${assignRatio}`,
-        rooms: ctRooms.map(r => r.room),
-        anesthetists: ctAnests.map(a => a.name),
-        color,
-      });
-    }
+    careTeams.push({
+      id: ctIdx, md: md.name, ratio: `1:${actualRatio}`,
+      rooms: ctRooms.map(r => r.room),
+      anesthetists: ctAnests.map(a => a.name),
+      color,
+    });
     usedMDs.add(md.name);
  
     ctRooms.forEach((room, i) => {
@@ -288,51 +264,41 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
         rooms[idx] = {
           ...rooms[idx],
           assignedProvider: md.name,
-          anesthetist:      ctAnests[i]?.name || null,
-          careTeamId:       isCTComfy ? ctIdx : undefined,
-          careTeamLabel:    teamLabel,
-          careTeamRatio:    isCTComfy ? `1:${assignRatio}` : null,
-          isCareTeam:       isCTComfy,
+          anesthetist:   ctAnests[i]?.name || null,
+          careTeamId:    ctIdx,
+          careTeamLabel: teamLabel,
+          careTeamRatio: `1:${actualRatio}`,
+          isCareTeam:    true,
         };
       }
     });
  
-    if (isCTComfy) ctIdx++;
+    ctIdx++;
   }
  
-  // ── BOOS: opportunistic 1:2 care team or solo ────────────────
-  // Only attempted after Main OR + Endo are fully formed.
-  // Max ratio is 1:2 (only 2 BOOS ORs exist — never 1:3).
-  // Gets a care team only if 2 BOOS rooms are running AND
-  // at least 2 anesthetists remain unused.
-  // Block-capable MD required if any room needs peripheral nerve blocks.
-  const remainingAnests = anesthetistPool.filter(a => !usedAnesthetists.has(a.name));
+  // ── BOOS: opportunistic 1:2 ──────────────────────────────────
+  const remainingAnests    = anesthetistPool.filter(a => !usedAnesthetists.has(a.name));
   const boosCareTeamPossible = boosRooms.length >= 2 && remainingAnests.length >= 2;
  
   if (boosCareTeamPossible) {
-    // Pick the best MD for BOOS — block-capable if needed
-    const boosNeedsBlock = boosRooms.some(r => boosNeedsPeripheralBlock(r));
+    const boosNeedsBlock    = boosRooms.some(r => boosNeedsPeripheralBlock(r));
     const remainingMDsForBoos = availableMDs.filter(p => !usedMDs.has(p.name));
- 
     let boosMD = null;
     if (boosNeedsBlock) {
-      // Regional-capable first
       boosMD = remainingMDsForBoos.find(p => REGIONAL_CAPABLE.includes(p.name));
     }
-    // Fall back to next available if no regional MD free, or blocks not needed
     if (!boosMD) boosMD = remainingMDsForBoos[0];
  
     if (boosMD) {
-      const boosAnests = remainingAnests.slice(0, 2); // max 2 — only 2 rooms
-      const boosColor  = CARE_TEAM_COLORS[ctIdx % CARE_TEAM_COLORS.length];
-      const boosLabel  = `Care Team ${ctIdx + 1} — ${boosMD.name.split(',')[0]} 1:2 (BOOS)`;
+      const boosAnests = remainingAnests.slice(0, 2);
+      const color      = CARE_TEAM_COLORS[ctIdx % CARE_TEAM_COLORS.length];
+      const teamLabel  = `Care Team ${ctIdx + 1} — ${boosMD.name.split(',')[0]} 1:2 (BOOS)`;
  
       careTeams.push({
         id: ctIdx, md: boosMD.name, ratio: '1:2',
         rooms: boosRooms.slice(0, 2).map(r => r.room),
         anesthetists: boosAnests.map(a => a.name),
-        color: boosColor,
-        isBOOS: true,
+        color, isBOOS: true,
       });
  
       usedMDs.add(boosMD.name);
@@ -347,35 +313,28 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
             assignedProvider: boosMD.name,
             anesthetist:   boosAnests[i]?.name || null,
             careTeamId:    ctIdx,
-            careTeamLabel: boosLabel,
+            careTeamLabel: teamLabel,
             careTeamRatio: '1:2',
             isCareTeam:    true,
           };
         }
       });
- 
       ctIdx++;
     }
   }
  
-  // ── FLOAT anesthetists ────────────────────────────────────────
+  // ── Float anesthetists ────────────────────────────────────────
   const floatAnests = anesthetistPool
     .filter(a => !usedAnesthetists.has(a.name))
     .slice(0, floatCount);
  
-  // ── SOLO ROOMS ────────────────────────────────────────────────
-  // Covers: BOOS rooms that didn't get a care team, IR (always),
-  // and any remaining Main OR rooms not in a care team.
+  // ── Solo fill ─────────────────────────────────────────────────
   const soloRooms = rooms.filter(r =>
     !r.isCareTeam && !r.isCardiac && !r.isCathEP && !r.isPhantom
   );
  
-  // soloUsed blocks ALL providers already placed anywhere (by buildAssignments or care teams)
-  // so the solo fill pass never reassigns someone already in a room.
+  // Sort remaining MDs in strict priority order: Locums → Backup Call → Rank 3+
   const allAssignedNow = new Set([...soloUsed, ...usedMDs]);
- 
-  // Sort remaining MDs in priority order: Locums first, then Backup Call (#2), then Rank 3+
-  // This ensures Watkins/Siddiqui/locums are used before Pipito, and Pipito before Raghove
   const remainingMDs = [
     ...workingMDs.filter(p => p.role === 'Locum'),
     ...workingMDs.filter(p => p.role === 'Back Up Call (#2)'),
@@ -386,7 +345,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
  
   let mdPool = [...remainingMDs];
  
-  // BOOS solo block rooms — regional-capable MD first
+  // BOOS block rooms — regional MD first
   for (const room of soloRooms.filter(r => r.isBOOS && boosNeedsPeripheralBlock(r))) {
     if (room.assignedProvider) continue;
     const md = mdPool.find(p => REGIONAL_CAPABLE.includes(p.name)) || mdPool[0];
@@ -398,7 +357,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     }
   }
  
-  // All other solo rooms (BOOS non-block, IR, leftover Main OR)
+  // All other solo rooms
   for (const room of soloRooms) {
     if (room.assignedProvider) continue;
     const md = mdPool.find(p => !room.avoidProviders?.includes(p.name)) || mdPool[0];
@@ -421,9 +380,6 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   return { rooms, careTeams, floats: floatAnests, available: availableMDsList, config, anesthetistCount };
 }
  
-// ── Pick rooms for a care team (Main OR only) ─────────────────
-// BOOS and IR never reach this function.
-// Hard-stops on 'no' compatibility in both passes.
 function pickStaggeredRooms(roomPool, count) {
   if (roomPool.length <= count) return roomPool.slice(0, count);
  
@@ -439,9 +395,7 @@ function pickStaggeredRooms(roomPool, count) {
  
   for (const room of withTimes) {
     if (picked.length >= count) break;
-    if (dominantBuilding) {
-      if (careTeamCompatible(dominantBuilding, room.building) === 'no') continue;
-    }
+    if (dominantBuilding && careTeamCompatible(dominantBuilding, room.building) === 'no') continue;
     const timeKey = room.sortTime?.split(' ')[1] || 'unknown';
     if (!usedTimes.has(timeKey) || picked.length < count) {
       picked.push(room);
