@@ -147,17 +147,9 @@ export default function App() {
 
   useEffect(() => {}, []);
 
-  const loadSchedule = useCallback(() => {
-    const parsed = parseCubeData(cubeRaw, selectedDate);
-    setDateMismatch(selectedDate && parsed.totalParsed === 0);
-    setPendingRooms(parsed.rooms);
-    setSchedLoaded(true);
-    if (qg?.ORCall && parsed.rooms.length > 0) {
-      setShowORCallPrompt(true);
-    } else {
-      finishBuildingSchedule(parsed.rooms, null);
-    }
-  }, [cubeRaw, qg, selectedDate]);
+  // Ref keeps finishBuildingSchedule current so loadSchedule and
+  // handleORCallConfirm never call a stale version with old qg/resourceStructure.
+  const finishRef = useRef(null);
 
   const finishBuildingSchedule = useCallback((roomsIn, orChoice) => {
     const assigned = qg ? buildAssignments(roomsIn, qg, orChoice) : roomsIn;
@@ -168,22 +160,35 @@ export default function App() {
     setRooms(ctResult.rooms);
     setCareTeamResult(ctResult);
     setOrCallChoice(orChoice);
-    // Auto-populate pairs from fractional data once rooms are available
     if (fractionalPairs.length > 0) {
       setRoomPairs(buildPairsFromFractional(fractionalPairs, ctResult.rooms));
     }
   }, [qg, resourceStructure, fractionalPairs]);
 
+  finishRef.current = finishBuildingSchedule;
+
+  const loadSchedule = useCallback(() => {
+    const parsed = parseCubeData(cubeRaw, selectedDate);
+    setDateMismatch(selectedDate && parsed.totalParsed === 0);
+    setPendingRooms(parsed.rooms);
+    setSchedLoaded(true);
+    if (qg?.ORCall && parsed.rooms.length > 0) {
+      setShowORCallPrompt(true);
+    } else {
+      finishRef.current(parsed.rooms, null);
+    }
+  }, [cubeRaw, qg, selectedDate]);
+
   const handleORCallConfirm = useCallback((choice) => {
     setShowORCallPrompt(false);
     if (qg?.ORCall && selectedDate) saveORCallChoice(qg.ORCall, selectedDate, choice);
-    finishBuildingSchedule(pendingRooms, choice);
-  }, [qg, selectedDate, pendingRooms, finishBuildingSchedule]);
+    finishRef.current(pendingRooms, choice);
+  }, [qg, selectedDate, pendingRooms]);
 
   const handleORCallSkip = useCallback(() => {
     setShowORCallPrompt(false);
-    finishBuildingSchedule(pendingRooms, null);
-  }, [pendingRooms, finishBuildingSchedule]);
+    finishRef.current(pendingRooms, null);
+  }, [pendingRooms]);
 
   const loadResourceStructure = useCallback((currentRooms) => {
     const rs     = resourceStructure;
