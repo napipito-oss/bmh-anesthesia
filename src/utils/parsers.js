@@ -562,22 +562,28 @@ export function buildAssignments(rooms, qg, orCallChoice) {
   result = cardiacDecisionTree(result, qg.CardiacCall || qg.ORCall, qg.BackupCV);
   result.forEach(r => { if (r.assignedProvider) used.add(r.assignedProvider); });
  
-  // Apply OR Call choice and immediately lock them out of all further assignment passes.
-  // This is the key fix: OR Call is removed from the fill order after their choice is applied
-  // so they cannot be assigned to a second room by any subsequent pass.
+  // Apply OR Call choice and lock them out of all further passes only if assignment succeeds.
+  // orCallConsumed is ONLY set true when the room is actually found and assigned.
+  // If the room isn't found for any reason, OR Call stays in the fill order so they
+  // still get assigned somewhere — we never silently drop them.
   let orCallConsumed = false;
   if (orCallChoice && qg.ORCall) {
     if (orCallChoice.type === 'available') {
-      // OR Call is floating — mark used so no room gets auto-assigned to them
       used.add(qg.ORCall);
       orCallConsumed = true;
     } else if (orCallChoice.type === 'room' && orCallChoice.room) {
-      const idx = result.findIndex(r => r.room === orCallChoice.room);
+      // Try exact match first, then fuzzy (normalise spaces/leading zeros)
+      const normalise = s => (s || '').toLowerCase().replace(/\s+/g, ' ').replace(/\b0+(\d)/g, '$1').trim();
+      const target = normalise(orCallChoice.room);
+      let idx = result.findIndex(r => r.room === orCallChoice.room);
+      if (idx < 0) idx = result.findIndex(r => normalise(r.room) === target);
       if (idx >= 0 && !result[idx].assignedProvider) {
         result[idx] = { ...result[idx], assignedProvider: qg.ORCall, isORCallChoice: true, choiceLabel: 'CHOICE' };
         used.add(qg.ORCall);
         orCallConsumed = true;
       }
+      // If room still not found, orCallConsumed stays false —
+      // OR Call remains in the fill order and will be assigned normally.
     }
   }
  
