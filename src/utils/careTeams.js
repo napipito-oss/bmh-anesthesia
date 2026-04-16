@@ -116,9 +116,11 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   const config             = getCareTeamConfig(anesthetistCount);
   const { careTeamRooms: maxCTRooms, ratios, floats: floatCount } = config;
  
-  // ── Pre-assigned cardiac/cath rooms
-  const preAssigned     = rooms.filter(r => r.assignedProvider && (r.isCardiac || r.isCathEP));
-  const unassignedRooms = rooms.filter(r => !preAssigned.find(p => p.room === r.room));
+  // ── Pre-assigned rooms: cardiac/cath AND any room already assigned by buildAssignments
+  // globalUsed must include ALL providers already placed so care team engine
+  // doesn't reassign them or use them in the mdPool for solo rooms.
+  const preAssigned     = rooms.filter(r => r.assignedProvider);
+  const unassignedRooms = rooms.filter(r => !r.assignedProvider);
  
   const globalUsed = new Set();
   preAssigned.forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
@@ -172,14 +174,14 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     const phantomCount  = cappedRatio - visibleRooms.length;
  
     const phantomRooms = Array.from({ length: phantomCount }, (_, i) => ({
-      room: `Endo Add-On Reserve ${i + 1}`,
+      room: 'Endo Add-Ons',
       area: 'BMH ENDO', building: 'ENDO_FLOOR',
       isEndo: true, isCareTeam: true, isPhantom: true,
       acuity: 'routine', cases: [], caseCount: 0, surgeons: [],
       flags: [{ level: 'info', msg: 'Reserved for inpatient add-on — no cases booked yet' }],
       assignedProvider: brandMD.name,
       anesthetist: endoAnests[visibleRooms.length + i]?.name || null,
-      careTeamId: 0, careTeamLabel: 'Care Team 1 — Add-On Reserve',
+      careTeamId: 0, careTeamLabel: 'Care Team 1 — Brand',
       careTeamRatio: `1:${cappedRatio}`, caseStatus: 'Not Started',
       cardiacNote: '', blockRequired: false, blockPossible: false,
       preferredProviders: [], avoidProviders: [], manuallyAdded: false,
@@ -438,3 +440,4 @@ function sortAnesthetistsByVariety(anesthetists, area, history) {
     return aCount - bCount;
   });
 }
+ 
