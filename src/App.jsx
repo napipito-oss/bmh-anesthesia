@@ -413,12 +413,7 @@ export default function App() {
                   <div style={{fontSize:'10px',color:'var(--accent-amber)',marginBottom:'8px'}}>⚠ Confirm or bypass Step 1 first</div>
                 )}
                 <textarea className="textarea" value={qgRaw} onChange={e=>setQgRaw(e.target.value)}
-                  placeholder={"Paste full week QGenda Calendar By Task export...
-
-OR Call	Eskew, Gregory S
-Back Up Call	Singh, Karampal
-Locum	Nielson, Mark
-..."}
+                  placeholder={"Paste full week QGenda Calendar By Task export...\n\nOR Call\tEskew, Gregory S\nBack Up Call\tSingh, Karampal\nLocum\tNielson, Mark\n..."}
                   disabled={!stepsUnlocked}
                   style={{opacity:stepsUnlocked?1:0.4}}
                 />
