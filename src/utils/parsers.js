@@ -390,7 +390,7 @@ export function parseCubeData(raw, forceDateStr) {
     if (!caseP) continue;
  
     const roomP = parts.find(p =>
-      /BMH\s+(OR\s+\d+|Endo\s+\d+|CL\s+\d+|CL\s+Minor|yAnes|BOOS|rIR|IR\s+\d+|Endo\s+BS|WL\b)/i.test(p) ||
+      /BMH\s+(OR\s+\d+|Endo\s+\d+|CL\s+\d+|CL\s+Minor|yAnes|BOOS|rIR\s*\d*|IR\s+\d+|Endo\s+BS|WL\b)/i.test(p) ||
       /BOOS\s+OR\s+\d+/i.test(p)
     ) || '';
  
@@ -617,9 +617,10 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     ...qg.workingMDs.filter(p => p.role === '7/8 Hr Shift'),
   ];
  
-  const blockOrder = ['Nielson, Mark', 'Lambert', 'Powell, Jason', 'Pipito, Nicholas A', 'Dodwani', 'Pond, William'];
+  // Block rooms — locum block-capable MDs first, then backup call/ranked
+  // Order respects: Nielson/Lambert/Powell (locums) → Dodwani/Pond (locums) → Pipito (backup call)
+  const blockOrder = ['Nielson, Mark', 'Lambert', 'Powell, Jason', 'Dodwani', 'Pond, William', 'Pipito, Nicholas A'];
  
-  // Block rooms — block-capable MD priority
   for (const room of result) {
     if (room.assignedProvider || !room.blockRequired) continue;
     for (const name of blockOrder) {
@@ -635,8 +636,21 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     if (brand) { room.assignedProvider = brand.name; used.add(brand.name); }
   }
  
-  // Peds — DeWitt or Pipito first
-  const pedsOrder = ['DeWitt, Bracken J', 'Pipito, Nicholas A'];
+  // IR — always solo, assign next available MD in priority order
+  // IR has cell/wifi issues so care teams are not appropriate
+  for (const room of result) {
+    if (room.assignedProvider || !room.isIR) continue;
+    for (const provider of allMDs) {
+      if (used.has(provider.name) || room.avoidProviders?.includes(provider.name)) continue;
+      room.assignedProvider = provider.name;
+      used.add(provider.name);
+      break;
+    }
+  }
+ 
+  // Peds — DeWitt first (employed, peds-capable), then locums capable of peds, then Pipito
+  // Pipito is backup call (#2) so locums should be exhausted before pulling him for peds
+  const pedsOrder = ['DeWitt, Bracken J', 'Gathings, Vincent', 'Nielson, Mark', 'Pipito, Nicholas A'];
   for (const room of result) {
     if (room.assignedProvider || room.acuity !== 'peds') continue;
     for (const name of pedsOrder) {
