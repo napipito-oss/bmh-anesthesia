@@ -116,14 +116,19 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   const config             = getCareTeamConfig(anesthetistCount);
   const { careTeamRooms: maxCTRooms, ratios, floats: floatCount } = config;
  
-  // ── Pre-assigned rooms: cardiac/cath AND any room already assigned by buildAssignments
-  // globalUsed must include ALL providers already placed so care team engine
-  // doesn't reassign them or use them in the mdPool for solo rooms.
-  const preAssigned     = rooms.filter(r => r.assignedProvider);
-  const unassignedRooms = rooms.filter(r => !r.assignedProvider);
+  // ── Pre-assigned rooms ──────────────────────────────────────
+  // preAssigned = cardiac/cath rooms whose MDs are locked (decision tree).
+  // unassignedRooms = everything else — care team engine assigns anesthetists
+  //   to these and may assign MDs to any that are still unassigned.
+  // globalUsed = ALL providers already placed by buildAssignments so the
+  //   care team engine never double-assigns or pulls them into mdPool.
+  const preAssigned     = rooms.filter(r => r.assignedProvider && (r.isCardiac || r.isCathEP));
+  const unassignedRooms = rooms.filter(r => !preAssigned.find(p => p.room === r.room));
  
   const globalUsed = new Set();
-  preAssigned.forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
+  // Seed globalUsed with every provider already assigned by buildAssignments,
+  // not just cardiac — this prevents the mdPool solo pass from re-assigning them.
+  rooms.forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
  
   // ── Hard geographic segregation ──────────────────────────────
   // BOOS and IR are pulled out before care team formation begins.
