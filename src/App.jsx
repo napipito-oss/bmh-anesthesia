@@ -630,17 +630,51 @@ export default function App() {
                       {careTeamResult.floats.map(f=><div key={f.name} style={{fontSize:'11px',color:'var(--text-primary)'}}>{f.name}</div>)}
                     </div>
                   )}
-                  {careTeamResult.available?.length > 0 && (
-                    <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'8px 12px'}}>
-                      <div style={{fontSize:'10px',color:'var(--text-muted)',fontWeight:'600',letterSpacing:'1px',marginBottom:'3px'}}>AVAILABLE</div>
-                      {orCallChoice?.type === 'available' && qg?.ORCall && (
-                        <div style={{fontSize:'11px',color:'#f97316',marginBottom:'2px'}}>
-                          {qg.ORCall.split(',')[0]} — 1st Available <span style={{fontSize:'9px',letterSpacing:'1px'}}>[CHOICE]</span>
-                        </div>
-                      )}
-                      {careTeamResult.available.map(p=><div key={p.name} style={{fontSize:'11px',color:'var(--text-secondary)'}}>{p.label}: {p.name.split(',')[0]}</div>)}
-                    </div>
-                  )}
+                  {/* Available MDs — unused MDs not assigned to any room */}
+                  {(() => {
+                    const assignedMDs = new Set(rooms.filter(r=>r.assignedProvider).map(r=>r.assignedProvider));
+                    const unusedMDs = (qg?.workingMDs || []).filter(p => !assignedMDs.has(p.name));
+                    // OR Call floating = first available, show them first
+                    const orCallFloating = orCallChoice?.type === 'available' && qg?.ORCall;
+                    if (unusedMDs.length === 0 && !orCallFloating) return null;
+                    return (
+                      <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'8px 12px',minWidth:'160px'}}>
+                        <div style={{fontSize:'10px',color:'var(--accent-blue)',fontWeight:'600',letterSpacing:'1px',marginBottom:'5px'}}>AVAILABLE MDs</div>
+                        {orCallFloating && (
+                          <div style={{fontSize:'11px',color:'#f97316',marginBottom:'3px',display:'flex',alignItems:'center',gap:'4px'}}>
+                            <span style={{fontSize:'9px',background:'#f97316',color:'#000',borderRadius:'2px',padding:'1px 4px',fontWeight:'700'}}>1ST AVAIL</span>
+                            {qg.ORCall.split(',')[0]}
+                          </div>
+                        )}
+                        {unusedMDs
+                          .filter(p => !(orCallFloating && p.name === qg?.ORCall))
+                          .map((p, i) => (
+                            <div key={p.name} style={{fontSize:'11px',color:'var(--text-secondary)',marginBottom:'2px'}}>
+                              {p.name.split(',')[0]}
+                              <span style={{fontSize:'9px',color:'var(--text-muted)',marginLeft:'5px'}}>{p.role}</span>
+                            </div>
+                          ))
+                        }
+                      </div>
+                    );
+                  })()}
+                  {/* Available Anesthetists — unused anesthetists */}
+                  {(() => {
+                    const assignedAnests = new Set(rooms.filter(r=>r.anesthetist).map(r=>r.anesthetist));
+                    const activeAnests   = (qg?.Anesthetists || []).filter(a => !a.isAdmin && !a.isOff);
+                    const unusedAnests   = activeAnests.filter(a => !assignedAnests.has(a.name));
+                    if (unusedAnests.length === 0) return null;
+                    return (
+                      <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'8px 12px',minWidth:'160px'}}>
+                        <div style={{fontSize:'10px',color:'#ec4899',fontWeight:'600',letterSpacing:'1px',marginBottom:'5px'}}>AVAILABLE ANESTHETISTS</div>
+                        {unusedAnests.map(a => (
+                          <div key={a.name} style={{fontSize:'11px',color:'var(--text-secondary)',marginBottom:'2px'}}>
+                            {a.name.split(',')[0]}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             )}
