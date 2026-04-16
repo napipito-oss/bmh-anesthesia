@@ -602,45 +602,50 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     ...qg.workingMDs.filter(p => p.role === '7/8 Hr Shift'),
   ];
  
+  // ── PRIORITY ASSIGNMENTS ONLY ────────────────────────────────
+  // buildAssignments locks in specialty/priority rooms.
+  // General fill and care team formation happen in buildCareTeams.
+ 
+  // All working MDs available for priority assignment
+  const allMDs = [
+    ...qg.workingMDs.filter(p => p.role === 'Cardiac Call (CV)'),
+    ...qg.workingMDs.filter(p => p.role === 'Backup CV'),
+    ...(!orCallConsumed ? qg.workingMDs.filter(p => p.role === 'OR Call (#1)') : []),
+    ...qg.workingMDs.filter(p => p.role === 'Locum'),
+    ...qg.workingMDs.filter(p => p.role === 'Back Up Call (#2)'),
+    ...qg.workingMDs.filter(p => p.rankNum >= 3 && p.rankNum < 50).sort((a, b) => a.rankNum - b.rankNum),
+    ...qg.workingMDs.filter(p => p.role === '7/8 Hr Shift'),
+  ];
+ 
   const blockOrder = ['Nielson, Mark', 'Lambert', 'Powell, Jason', 'Pipito, Nicholas A', 'Dodwani', 'Pond, William'];
  
-  // Block rooms first
+  // Block rooms — block-capable MD priority
   for (const room of result) {
     if (room.assignedProvider || !room.blockRequired) continue;
     for (const name of blockOrder) {
-      const p = order.find(p => p.name === name && !used.has(p.name));
+      const p = allMDs.find(p => p.name === name && !used.has(p.name));
       if (p) { room.assignedProvider = p.name; used.add(p.name); break; }
     }
   }
  
-  // Endo — Brand first
+  // Endo — Brand always
   for (const room of result) {
     if (room.assignedProvider || !room.isEndo) continue;
-    const brand = order.find(p => p.name === 'Brand, David L' && !used.has(p.name));
+    const brand = allMDs.find(p => p.name === 'Brand, David L' && !used.has(p.name));
     if (brand) { room.assignedProvider = brand.name; used.add(brand.name); }
   }
  
-  // Peds
+  // Peds — DeWitt or Pipito first
   const pedsOrder = ['DeWitt, Bracken J', 'Pipito, Nicholas A'];
   for (const room of result) {
     if (room.assignedProvider || room.acuity !== 'peds') continue;
     for (const name of pedsOrder) {
-      const p = order.find(p => p.name === name && !used.has(p.name));
+      const p = allMDs.find(p => p.name === name && !used.has(p.name));
       if (p) { room.assignedProvider = p.name; used.add(p.name); break; }
     }
   }
  
-  // General fill — OR Call only participates if not consumed
-  for (const room of result) {
-    if (room.assignedProvider) continue;
-    for (const provider of order) {
-      if (used.has(provider.name) || room.avoidProviders?.includes(provider.name)) continue;
-      room.assignedProvider = provider.name;
-      used.add(provider.name);
-      break;
-    }
-  }
- 
+  // Remaining rooms left unassigned — buildCareTeams handles them
   return result;
 }
  
