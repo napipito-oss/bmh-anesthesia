@@ -210,7 +210,11 @@ export default function App() {
     setAiLoad(false);
   }, [qg, rooms]);
 
-  const critFlags = rooms.flatMap(r => (r.flags||[]).filter(f=>f.level==='critical').map(f=>({...f,room:r.room})));
+  const critFlags = (() => {
+    const seen = new Set();
+    return rooms.flatMap(r => (r.flags||[]).filter(f=>f.level==='critical').map(f=>({...f,room:r.room})))
+      .filter(f => { const key = `${f.room}:${f.msg}`; if (seen.has(key)) return false; seen.add(key); return true; });
+  })();
   const today = new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
 
   return (
