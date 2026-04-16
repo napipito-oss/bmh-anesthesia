@@ -1,7 +1,10 @@
 // ─────────────────────────────────────────────────────────────
-// PARSING UTILITIES — v4.1
-// Changes from v4:
-//   - BMH WL room label → "Add-On Room"
+// PARSING UTILITIES — v4.2
+// Fixes:
+//   - OB Call excluded from workingMDs entirely
+//   - OR Call provider removed from fill order after choice applied
+//     (prevents double-assignment e.g. Eskew in 2 rooms)
+//   - BMH WL → "BMH OR Add-On Room" (consistent label)
 // ─────────────────────────────────────────────────────────────
 import { SURGEON_BLOCKS } from '../data/surgeons.js';
  
@@ -10,12 +13,12 @@ const NO_DEVICE_ANES_SURGEONS = ['Moran', 'Graham', 'Rivera Maza', 'Wagle', 'Sal
  
 export function classifyRoom(roomStr) {
   const r = (roomStr || '').toLowerCase();
-  const isIR = /\brir\b/.test(r) || /\bir\s*[12]\b/.test(r) || r.includes('ir suite');
-  const isEndo = r.includes('endo') || r.includes('gi ');
+  const isIR     = /\brir\b/.test(r) || /\bir\s*[12]\b/.test(r) || r.includes('ir suite');
+  const isEndo   = r.includes('endo') || r.includes('gi ');
   const isCathEP = r.includes('cl ') || r.includes('cath') ||
     r.includes('yanes') || r.includes('ep lab') || r.includes('ep ');
-  const isBOOS = r.includes('boos');
-  const isAddOn = r.includes('wl');
+  const isBOOS   = r.includes('boos');
+  const isAddOn  = /\bwl\b/i.test(roomStr || '');   // tightened: word-boundary match
   const isMainOR = !isIR && !isEndo && !isCathEP && !isBOOS;
  
   let building;
@@ -29,8 +32,8 @@ export function classifyRoom(roomStr) {
 }
  
 function needsAnesthesia(procedure, surgeon, room) {
-  const proc = (procedure || '').toLowerCase();
-  const rm = (room || '').toLowerCase();
+  const proc     = (procedure || '').toLowerCase();
+  const rm       = (room || '').toLowerCase();
   const surgLast = (surgeon || '').split(',')[0].trim();
  
   if (rm.includes('zno anes') || rm.includes('z no anes') || proc.includes('zno anes'))
@@ -60,10 +63,7 @@ function needsAnesthesia(procedure, surgeon, room) {
   if (proc.includes('loop recorder'))
     return { needs: false, reason: 'Loop recorder — no anesthesia (all surgeons)' };
  
-  if (
-    proc.includes('pfo closure') || proc.includes('pfo repair') ||
-    proc.includes('patent foramen ovale')
-  )
+  if (proc.includes('pfo closure') || proc.includes('pfo repair') || proc.includes('patent foramen ovale'))
     return { needs: false, reason: 'PFO closure — no anesthesia' };
  
   if (proc.includes('tee') || proc.includes('transesophageal'))
@@ -111,7 +111,7 @@ export function parseQGenda(raw, forceDateStr) {
   let targetDateFormatted = null;
   if (forceDateStr) {
     const d = new Date(forceDateStr + 'T12:00:00');
-    targetDayName = d.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+    targetDayName       = d.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
     targetDateFormatted = d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   }
  
@@ -124,24 +124,21 @@ export function parseQGenda(raw, forceDateStr) {
     Ranks: {}, Locums: [], Anesthetists: [], workingMDs: [], notAvailable: [],
   };
  
-  const assigned = new Set();
+  const assigned       = new Set();
   const backUpCallNames = [];
-  const lines = raw.trim().split('\n');
-  let inTargetDay = !forceDateStr;
+  const lines          = raw.trim().split('\n');
+  let inTargetDay      = !forceDateStr;
  
   for (const line of lines) {
-    const parts = line.split('\t').map(p => p.trim());
+    const parts   = line.split('\t').map(p => p.trim());
     const roleRaw = parts[0]?.trim() || '';
-    const name = parts[1]?.trim() || '';
-    const rl = roleRaw.toLowerCase().trim();
+    const name    = parts[1]?.trim() || '';
+    const rl      = roleRaw.toLowerCase().trim();
  
-    const isDayName = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].includes(rl);
+    const isDayName  = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].includes(rl);
     const isDateLine = /^[a-z]+ \d+, \d{4}$/i.test(roleRaw.trim());
  
-    if (isDayName) {
-      if (forceDateStr) inTargetDay = (rl === targetDayName);
-      continue;
-    }
+    if (isDayName)  { if (forceDateStr) inTargetDay = (rl === targetDayName); continue; }
     if (isDateLine) continue;
     if (!inTargetDay) continue;
     if (!roleRaw || !name || name.length < 2) continue;
@@ -155,36 +152,33 @@ export function parseQGenda(raw, forceDateStr) {
     }
  
     if (rl.includes('anesthetist') || rl.includes('crna')) {
-      const shiftM = roleRaw.match(/(630a-730p|7a-3p|7a-5p|7a-8p|7a-7p)/i);
+      const shiftM  = roleRaw.match(/(630a-730p|7a-3p|7a-5p|7a-8p|7a-7p)/i);
       const isAdmin = rl.includes('admin');
-      const isOff = rl.includes('off/pto') || (rl.includes('off') && rl.includes('pto'));
-      if (!isOff && !result.Anesthetists.find(a => a.name === name)) {
+      const isOff   = rl.includes('off/pto') || (rl.includes('off') && rl.includes('pto'));
+      if (!isOff && !result.Anesthetists.find(a => a.name === name))
         result.Anesthetists.push({ name, shift: shiftM?.[1] || '7a-5p', isAdmin, isOff: false });
-      }
       continue;
     }
  
     if (name && !assigned.has(name)) {
       assigned.add(name);
-      if (rl.includes('personal time off'))         result.PTO.push(name);
-      else if (rl.trim() === 'off')                 result.OFF.push(name);
-      else if (rl.includes('post or'))              result.PostOR.push(name);
-      else if (rl.includes('post ob'))              result.PostOB.push(name);
-      else if (rl.includes('or call') && !rl.includes('post') && !rl.includes('back'))
-                                                     result.ORCall = name;
-      else if (rl.includes('back up call') || rl.includes('backup call'))
-                                                     backUpCallNames.push(name);
-      else if (rl.includes('ob call'))              result.OBCall = name;
-      else if (rl.includes('cardiac call'))         result.CardiacCall = name;
-      else if (rl.includes('backup cv'))            result.BackupCV = name;
-      else if (rl.includes('7/8 hour shift'))       result.SevenEightShift = name;
-      else if (rl.includes('locum'))                result.Locums.push(name);
+      if      (rl.includes('personal time off'))                                   result.PTO.push(name);
+      else if (rl.trim() === 'off')                                                result.OFF.push(name);
+      else if (rl.includes('post or'))                                             result.PostOR.push(name);
+      else if (rl.includes('post ob'))                                             result.PostOB.push(name);
+      else if (rl.includes('or call') && !rl.includes('post') && !rl.includes('back')) result.ORCall = name;
+      else if (rl.includes('back up call') || rl.includes('backup call'))         backUpCallNames.push(name);
+      else if (rl.includes('ob call'))                                             result.OBCall = name;
+      else if (rl.includes('cardiac call'))                                        result.CardiacCall = name;
+      else if (rl.includes('backup cv'))                                           result.BackupCV = name;
+      else if (rl.includes('7/8 hour shift'))                                      result.SevenEightShift = name;
+      else if (rl.includes('locum'))                                               result.Locums.push(name);
     }
   }
  
   const anesthetistNames = new Set(result.Anesthetists.map(a => a.name));
-  const backUpAAs = backUpCallNames.filter(n => anesthetistNames.has(n));
-  const backUpMDs = backUpCallNames.filter(n => !anesthetistNames.has(n));
+  const backUpAAs        = backUpCallNames.filter(n => anesthetistNames.has(n));
+  const backUpMDs        = backUpCallNames.filter(n => !anesthetistNames.has(n));
  
   if (backUpAAs.length >= 2 && backUpMDs.length === 0) {
     result.aaBackupCall = true; result.BackUpCallAAs = backUpAAs; result.BackUpCall = null;
@@ -198,11 +192,14 @@ export function parseQGenda(raw, forceDateStr) {
     if (name && !result.workingMDs.find(p => p.name === name))
       result.workingMDs.push({ name, role, rankNum });
   };
+ 
   addMD(result.ORCall,          'OR Call (#1)',      1);
   if (result.BackUpCall) addMD(result.BackUpCall, 'Back Up Call (#2)', 2);
   addMD(result.CardiacCall,     'Cardiac Call (CV)', 0);
   addMD(result.BackupCV,        'Backup CV',         0);
-  addMD(result.OBCall,          'OB Call',           0);
+  // ── OB Call intentionally excluded from workingMDs ───────────
+  // OB Call provider covers OB only — not available for OR assignments.
+  // result.OBCall is still stored for reference but never added to workingMDs.
   addMD(result.SevenEightShift, '7/8 Hr Shift',     99);
  
   Object.entries(result.Ranks)
@@ -219,13 +216,15 @@ export function parseQGenda(raw, forceDateStr) {
     ...result.OFF.map(n    => ({ name: n, reason: 'OFF' })),
     ...result.PostOR.map(n => ({ name: n, reason: 'Post OR — off-site' })),
     ...result.PostOB.map(n => ({ name: n, reason: 'Post OB — off-site' })),
+    // OB Call shown as unavailable so user knows where they are
+    ...(result.OBCall ? [{ name: result.OBCall, reason: 'OB Call — covering OB' }] : []),
   ];
  
   return result;
 }
  
 export function classifyCase(procedure, surgeon, room) {
-  const proc = (procedure || '').toLowerCase();
+  const proc     = (procedure || '').toLowerCase();
   const surgLast = (surgeon || '').split(',')[0].trim();
   const surgProfile = SURGEON_BLOCKS[surgLast];
  
@@ -279,16 +278,16 @@ export function classifyCase(procedure, surgeon, room) {
   }
  
   if (surgProfile) {
-    const rule = surgProfile.blockRule;
+    const rule    = surgProfile.blockRule;
     const neverAll = surgProfile.neverBlock?.includes('all');
-    if      (rule === 'always')    { blockRequired = true;  blockPossible = true;  blockNote = surgProfile.notes; }
+    if      (rule === 'always')      { blockRequired = true;  blockPossible = true;  blockNote = surgProfile.notes; }
     else if (rule === 'never' || neverAll)
-                                    { blockRequired = false; blockPossible = false; blockNote = surgProfile.notes; }
-    else if (rule === 'usually')   { const isNev = surgProfile.neverBlock?.some(n => proc.includes(n)); blockRequired = !isNev; blockPossible = !isNev; blockNote = surgProfile.notes; }
+                                      { blockRequired = false; blockPossible = false; blockNote = surgProfile.notes; }
+    else if (rule === 'usually')     { const isNev = surgProfile.neverBlock?.some(n => proc.includes(n)); blockRequired = !isNev; blockPossible = !isNev; blockNote = surgProfile.notes; }
     else if (['specific','selective'].includes(rule)) { const m = surgProfile.blockCases?.some(bc => proc.includes(bc.toLowerCase())); blockRequired = m; blockPossible = m; blockNote = surgProfile.notes; }
-    else if (rule === 'offered')   { blockRequired = false; blockPossible = true;  blockNote = surgProfile.notes; }
-    else if (rule === 'appropriate') { blockRequired = false; blockPossible = true; blockNote = surgProfile.notes; }
-    else if (rule === 'rarely')    { blockRequired = false; blockPossible = proc.includes('open') || proc.includes('laparotomy'); blockNote = surgProfile.notes; }
+    else if (rule === 'offered')     { blockRequired = false; blockPossible = true;  blockNote = surgProfile.notes; }
+    else if (rule === 'appropriate') { blockRequired = false; blockPossible = true;  blockNote = surgProfile.notes; }
+    else if (rule === 'rarely')      { blockRequired = false; blockPossible = proc.includes('open') || proc.includes('laparotomy'); blockNote = surgProfile.notes; }
     else if (rule === 'mood-dependent') { blockRequired = false; blockPossible = true; blockNote = surgProfile.notes; flags.push({ level: 'warn', msg: `${surgLast}: ${surgProfile.notes}` }); }
     if (surgProfile.flags?.length) surgProfile.flags.forEach(f => flags.push({ level: 'warn', msg: f }));
   } else {
@@ -342,9 +341,9 @@ export function classifyCase(procedure, surgeon, room) {
   return {
     acuity, caseType, isFastTurnover, isRobotic,
     isCathEP, isCardiac, isThoracic,
-    isEndo: roomType.isEndo,
-    isBOOS: roomType.isBOOS,
-    isIR:   roomType.isIR,
+    isEndo:   roomType.isEndo,
+    isBOOS:   roomType.isBOOS,
+    isIR:     roomType.isIR,
     building: roomType.building,
     blockRequired, blockPossible, blockNote,
     preferredProviders: [...new Set(preferredProviders)],
@@ -356,13 +355,13 @@ export function classifyCase(procedure, surgeon, room) {
 export function parseCubeData(raw, forceDateStr) {
   if (!raw?.trim()) return { rooms: [], excluded: [], flagged: [], targetDate: null, totalParsed: 0 };
  
-  const lines = raw.trim().split('\n');
-  const allCases = [];
-  let currentDate = null;
-  let currentArea = null;
+  const lines      = raw.trim().split('\n');
+  const allCases   = [];
+  let currentDate  = null;
+  let currentArea  = null;
  
   for (const line of lines) {
-    const parts = line.split('\t').map(p => p?.trim() || '');
+    const parts    = line.split('\t').map(p => p?.trim() || '');
     if (parts.every(p => !p)) continue;
  
     const firstCol = parts[0].trim();
@@ -391,46 +390,45 @@ export function parseCubeData(raw, forceDateStr) {
     if (!caseP) continue;
  
     const roomP = parts.find(p =>
-      /BMH\s+(OR\s+\d+|Endo\s+\d+|CL\s+\d+|CL\s+Minor|yAnes|BOOS|rIR|IR\s+\d+|Endo\s+BS|WL)/i.test(p) ||
+      /BMH\s+(OR\s+\d+|Endo\s+\d+|CL\s+\d+|CL\s+Minor|yAnes|BOOS|rIR|IR\s+\d+|Endo\s+BS|WL\b)/i.test(p) ||
       /BOOS\s+OR\s+\d+/i.test(p)
     ) || '';
  
-    const surgP   = parts.find(p => /[A-Z][a-z]+,\s+[A-Z].*(?:MD|DO|DPM)/i.test(p)) || '';
-    const surgIdx = parts.indexOf(surgP);
+    const surgP     = parts.find(p => /[A-Z][a-z]+,\s+[A-Z].*(?:MD|DO|DPM)/i.test(p)) || '';
+    const surgIdx   = parts.indexOf(surgP);
     const cleanProc = (surgIdx >= 0 && surgIdx + 1 < parts.length ? parts[surgIdx + 1] : '')
       .replace(/\s+\d+$/, '').trim();
     const encP = parts.find(p => /OUTPATIENT|INPATIENT|EMERGENCY|PREADMIT|OBSERVATION/i.test(p)) || '';
  
     const roomType = classifyRoom(roomP);
  
-    // ── Add-On Room detection — BMH WL label ──────────────────
-    const isAddOnRoom = roomType.isAddOn || roomP.toUpperCase().includes('WL');
-    const displayRoom = isAddOnRoom ? 'Add-On Room' : roomP;
+    // ── Add-On Room: any BMH WL room → consistent display label ──
+    const isAddOnRoom = roomType.isAddOn || /\bWL\b/i.test(roomP);
+    const displayRoom = isAddOnRoom ? 'BMH OR Add-On Room' : roomP;
  
     const detectedArea = currentArea || (
-      roomType.isCathEP  ? 'BMH CATH LAB' :
-      roomType.isEndo    ? 'BMH ENDO' :
-      roomType.isBOOS    ? 'BOOS OR' :
-      roomType.isIR      ? 'BMH IR' :
-      isAddOnRoom        ? 'BMH OR' :
-                           'BMH OR'
+      roomType.isCathEP ? 'BMH CATH LAB' :
+      roomType.isEndo   ? 'BMH ENDO' :
+      roomType.isBOOS   ? 'BOOS OR' :
+      roomType.isIR     ? 'BMH IR' :
+                          'BMH OR'
     );
  
     const anesCheck = needsAnesthesia(cleanProc, surgP, roomP);
  
     allCases.push({
-      date: currentDate,
-      caseNumber: caseP,
-      room: displayRoom,
-      area: detectedArea,
-      building: roomType.building,
-      encounterType: encP,
-      surgeon: surgP,
-      procedure: cleanProc,
+      date:           currentDate,
+      caseNumber:     caseP,
+      room:           displayRoom,
+      area:           detectedArea,
+      building:       roomType.building,
+      encounterType:  encP,
+      surgeon:        surgP,
+      procedure:      cleanProc,
       needsAnesthesia: anesCheck.needs,
-      anesReason: anesCheck.reason,
-      anesFlag: anesCheck.flag || false,
-      manuallyAdded: false,
+      anesReason:     anesCheck.reason,
+      anesFlag:       anesCheck.flag || false,
+      manuallyAdded:  false,
     });
   }
  
@@ -439,11 +437,11 @@ export function parseCubeData(raw, forceDateStr) {
  
   let targetDate;
   if (forceDateStr) {
-    const d = new Date(forceDateStr + 'T12:00:00');
+    const d  = new Date(forceDateStr + 'T12:00:00');
     targetDate = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
   } else {
     const today = new Date().toLocaleDateString('en-US');
-    targetDate = dateCounts[today]
+    targetDate  = dateCounts[today]
       ? today
       : Object.entries(dateCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
   }
@@ -473,12 +471,12 @@ export function parseCubeData(raw, forceDateStr) {
  
     return {
       room,
-      area:      roomCases[0].area,
+      area:               roomCases[0].area,
       building,
-      cases:     roomCases,
-      caseCount: roomCases.length,
-      surgeons:  [...new Set(roomCases.map(c => c.surgeon))],
-      startTime: roomCases[0].date,
+      cases:              roomCases,
+      caseCount:          roomCases.length,
+      surgeons:           [...new Set(roomCases.map(c => c.surgeon))],
+      startTime:          roomCases[0].date,
       acuity,
       blockRequired:      allIntel.some(i => i.blockRequired),
       blockPossible:      allIntel.some(i => i.blockPossible),
@@ -559,25 +557,37 @@ export function buildAssignments(rooms, qg, orCallChoice) {
   let result = rooms.map(r => ({ ...r }));
   const used = new Set();
  
+  // OB Call is excluded from workingMDs at parse time, so no filter needed here.
+  // Cardiac decision tree runs first.
   result = cardiacDecisionTree(result, qg.CardiacCall || qg.ORCall, qg.BackupCV);
   result.forEach(r => { if (r.assignedProvider) used.add(r.assignedProvider); });
  
+  // Apply OR Call choice and immediately lock them out of all further assignment passes.
+  // This is the key fix: OR Call is removed from the fill order after their choice is applied
+  // so they cannot be assigned to a second room by any subsequent pass.
+  let orCallConsumed = false;
   if (orCallChoice && qg.ORCall) {
     if (orCallChoice.type === 'available') {
+      // OR Call is floating — mark used so no room gets auto-assigned to them
       used.add(qg.ORCall);
+      orCallConsumed = true;
     } else if (orCallChoice.type === 'room' && orCallChoice.room) {
       const idx = result.findIndex(r => r.room === orCallChoice.room);
       if (idx >= 0 && !result[idx].assignedProvider) {
         result[idx] = { ...result[idx], assignedProvider: qg.ORCall, isORCallChoice: true, choiceLabel: 'CHOICE' };
         used.add(qg.ORCall);
+        orCallConsumed = true;
       }
     }
   }
  
+  // Build fill order — exclude OR Call if their choice was applied (consumed),
+  // and always exclude OB Call (not in workingMDs anyway, but belt-and-suspenders).
   const order = [
     ...qg.workingMDs.filter(p => p.role === 'Cardiac Call (CV)'),
     ...qg.workingMDs.filter(p => p.role === 'Backup CV'),
-    ...qg.workingMDs.filter(p => p.role === 'OR Call (#1)'),
+    // OR Call only included in fill order if they haven't been consumed by their choice
+    ...(!orCallConsumed ? qg.workingMDs.filter(p => p.role === 'OR Call (#1)') : []),
     ...qg.workingMDs.filter(p => p.role === 'Locum'),
     ...qg.workingMDs.filter(p => p.role === 'Back Up Call (#2)'),
     ...qg.workingMDs.filter(p => p.rankNum >= 3 && p.rankNum < 50).sort((a, b) => a.rankNum - b.rankNum),
@@ -586,6 +596,7 @@ export function buildAssignments(rooms, qg, orCallChoice) {
  
   const blockOrder = ['Nielson, Mark', 'Lambert', 'Powell, Jason', 'Pipito, Nicholas A', 'Dodwani', 'Pond, William'];
  
+  // Block rooms first
   for (const room of result) {
     if (room.assignedProvider || !room.blockRequired) continue;
     for (const name of blockOrder) {
@@ -594,12 +605,14 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     }
   }
  
+  // Endo — Brand first
   for (const room of result) {
     if (room.assignedProvider || !room.isEndo) continue;
     const brand = order.find(p => p.name === 'Brand, David L' && !used.has(p.name));
     if (brand) { room.assignedProvider = brand.name; used.add(brand.name); }
   }
  
+  // Peds
   const pedsOrder = ['DeWitt, Bracken J', 'Pipito, Nicholas A'];
   for (const room of result) {
     if (room.assignedProvider || room.acuity !== 'peds') continue;
@@ -609,6 +622,7 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     }
   }
  
+  // General fill — OR Call only participates if not consumed
   for (const room of result) {
     if (room.assignedProvider) continue;
     for (const provider of order) {
@@ -621,3 +635,4 @@ export function buildAssignments(rooms, qg, orCallChoice) {
  
   return result;
 }
+ 
