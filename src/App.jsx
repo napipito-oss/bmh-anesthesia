@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { PROVIDERS, ANESTHETIST_SHIFTS, LATE_STAY_PRIORITY } from './data/providers.js';
 import { SURGEON_BLOCKS } from './data/surgeons.js';
 import { parseQGenda, parseCubeData, buildAssignments } from './utils/parsers.js';
@@ -55,6 +55,47 @@ const QUICK_PROMPTS = [
   "Which anesthetists need relief first this afternoon?",
 ];
 
+// ── PAIR UTILITIES ────────────────────────────────────────────
+// pairs: Map<roomName, roomName> — bidirectional, one entry per room
+// e.g. { 'BMH IR 1': 'BMH OR 6', 'BMH OR 6': 'BMH IR 1' }
+
+function getPairKey(roomA, roomB) {
+  return [roomA, roomB].sort().join('|||');
+}
+
+function buildPairsFromFractional(fractionalPairs, rooms) {
+  // Auto-detect pairs from Step 1 fractional data.
+  // fractionalPairs: [{ morning: 'IR', afternoon: 'MAIN OR', ... }]
+  // We match the first room of the morning area to the first room of the afternoon area.
+  const newPairs = {};
+  for (const fp of fractionalPairs) {
+    const morningRoom = rooms.find(r => {
+      const b = r.building || '';
+      if (fp.morning === 'IR')      return b === 'IR';
+      if (fp.morning === 'BOOS')    return b === 'BOOS';
+      if (fp.morning === 'CATH')    return b === 'CATH_FLOOR';
+      if (fp.morning === 'ENDO')    return b === 'ENDO_FLOOR';
+      if (fp.morning === 'MAIN OR') return b === 'MAIN_OR_FLOOR';
+      return false;
+    });
+    const afternoonRoom = rooms.find(r => {
+      if (r === morningRoom) return false;
+      const b = r.building || '';
+      if (fp.afternoon === 'IR')      return b === 'IR';
+      if (fp.afternoon === 'BOOS')    return b === 'BOOS';
+      if (fp.afternoon === 'CATH')    return b === 'CATH_FLOOR';
+      if (fp.afternoon === 'ENDO')    return b === 'ENDO_FLOOR';
+      if (fp.afternoon === 'MAIN OR') return b === 'MAIN_OR_FLOOR';
+      return false;
+    });
+    if (morningRoom && afternoonRoom) {
+      newPairs[morningRoom.room]   = afternoonRoom.room;
+      newPairs[afternoonRoom.room] = morningRoom.room;
+    }
+  }
+  return newPairs;
+}
+
 export default function App() {
   const [tab, setTab] = useState('board');
   const [qgRaw, setQgRaw] = useState('');
@@ -73,6 +114,12 @@ export default function App() {
   const [provSearch, setProvSearch] = useState('');
   const [surgSearch, setSurgSearch] = useState('');
   const [selectedDate, setSelectedDate] = useState('');
+
+  // ── PAIR STATE ────────────────────────────────────────────────
+  // roomPairs: { [roomName]: pairedRoomName }  (bidirectional)
+  const [roomPairs, setRoomPairs] = useState({});
+  const [dragSourceRoom, setDragSourceRoom] = useState(null);
+  const [dragOverRoom, setDragOverRoom] = useState(null);
 
   const loadQG = useCallback(() => {
     const parsed = parseQGenda(qgRaw, selectedDate);
@@ -112,23 +159,24 @@ export default function App() {
     }
   }, [cubeRaw, qg, selectedDate]);
 
-  // ── KEY CHANGE: resourceStructure now passed to buildCareTeams ──
   const finishBuildingSchedule = useCallback((roomsIn, orChoice) => {
     const assigned = qg ? buildAssignments(roomsIn, qg, orChoice) : roomsIn;
-    const history = getAnesthetistLocationCounts();
+    const history  = getAnesthetistLocationCounts();
     const ctResult = qg
       ? buildCareTeams(assigned, qg, history, resourceStructure)
       : { rooms: assigned, careTeams: [], floats: [], available: [] };
     setRooms(ctResult.rooms);
     setCareTeamResult(ctResult);
     setOrCallChoice(orChoice);
-  }, [qg, resourceStructure]);
+    // Auto-populate pairs from fractional data once rooms are available
+    if (fractionalPairs.length > 0) {
+      setRoomPairs(buildPairsFromFractional(fractionalPairs, ctResult.rooms));
+    }
+  }, [qg, resourceStructure, fractionalPairs]);
 
   const handleORCallConfirm = useCallback((choice) => {
     setShowORCallPrompt(false);
-    if (qg?.ORCall && selectedDate) {
-      saveORCallChoice(qg.ORCall, selectedDate, choice);
-    }
+    if (qg?.ORCall && selectedDate) saveORCallChoice(qg.ORCall, selectedDate, choice);
     finishBuildingSchedule(pendingRooms, choice);
   }, [qg, selectedDate, pendingRooms, finishBuildingSchedule]);
 
@@ -138,15 +186,14 @@ export default function App() {
   }, [pendingRooms, finishBuildingSchedule]);
 
   const loadResourceStructure = useCallback((currentRooms) => {
-    const rs = resourceStructure;
+    const rs     = resourceStructure;
     const mainOR = parseFloat(rs.mainOR) || 0;
     const endo   = parseFloat(rs.endo)   || 0;
     const cath   = parseFloat(rs.cath)   || 0;
     const boos   = parseFloat(rs.boos)   || 0;
     const ir     = parseFloat(rs.ir)     || 0;
     const roomsToAnalyze = currentRooms || rooms;
-    const gaps = [];
-    const pairs = [];
+    const gaps = [], pairs = [];
 
     const cubeEndo   = roomsToAnalyze.filter(r => r.isEndo).length;
     const cubeCath   = roomsToAnalyze.filter(r => r.isCathEP).length;
@@ -165,8 +212,8 @@ export default function App() {
     if (cath   % 1 !== 0 && cath   > 0) fractions.push({ area: 'CATH',    frac: cath   % 1 });
     if (boos   % 1 !== 0 && boos   > 0) fractions.push({ area: 'BOOS',    frac: boos   % 1 });
 
-    const fracOrder = { 'IR':0,'BOOS':1,'CATH':2,'ENDO':3,'MAIN OR':4 };
-    const sortedFracs = [...fractions].sort((a,b) => (fracOrder[a.area]||5)-(fracOrder[b.area]||5));
+    const fracOrder    = { 'IR':0,'BOOS':1,'CATH':2,'ENDO':3,'MAIN OR':4 };
+    const sortedFracs  = [...fractions].sort((a,b) => (fracOrder[a.area]||5)-(fracOrder[b.area]||5));
     for (let i = 0; i+1 < sortedFracs.length; i += 2) {
       pairs.push({ morning: sortedFracs[i].area, afternoon: sortedFracs[i+1].area, label: `${sortedFracs[i].area} → ${sortedFracs[i+1].area}`, autoDetected: true, overrideRoom: null });
       gaps.push({ area:'COMBINED', needed:1, booked:1, gap:0, level:'info', msg:`Combined resource: ${sortedFracs[i].area} (morning) → ${sortedFracs[i+1].area} (afternoon) — one provider covers both. Can be adjusted in Assignments.` });
@@ -178,35 +225,97 @@ export default function App() {
     const boosNeeded   = Math.ceil(boos);
     const irNeeded     = Math.ceil(ir);
 
-    if (endoNeeded > 0 && cubeEndo < endoNeeded) {
-      const gap = endoNeeded - cubeEndo;
-      gaps.push({ area:'ENDO', needed:endoNeeded, booked:cubeEndo, gap, level:'warn', msg:`Endo: ${endo} rooms committed, ${cubeEndo} booked → ${gap} unstaffed. Staff for inpatient add-ons.` });
-    }
-    if (cathNeeded > 0 && cubeCath < cathNeeded) {
-      const gap = cathNeeded - cubeCath;
-      gaps.push({ area:'CATH', needed:cathNeeded, booked:cubeCath, gap, level:'warn', msg:`Cath Lab: ${cath} slots committed, ${cubeCath} booked → ${gap} slot(s) for TEE/cardioversion/cath minor.` });
-    }
-    if (mainORNeeded > 0 && cubeMainOR < mainORNeeded) {
-      const gap = mainORNeeded - cubeMainOR;
-      gaps.push({ area:'MAIN OR', needed:mainORNeeded, booked:cubeMainOR, gap, level: gap > 1 ? 'critical' : 'warn', msg:`Main OR: ${mainOR} rooms committed, ${cubeMainOR} booked → ${gap} unbooked.${gap===1?' Includes add-on room — staff even with no cases.':' Includes add-on room + possible open heart coverage (OR 5).'}` });
-    }
-    if (boosNeeded > 0 && cubeBOOS < boosNeeded) {
-      gaps.push({ area:'BOOS', needed:boosNeeded, booked:cubeBOOS, gap:boosNeeded-cubeBOOS, level:'info', msg:`BOOS: ${boos} rooms committed, ${cubeBOOS} booked → staff for add-ons.` });
-    }
-    if (irNeeded > 0 && cubeIR < irNeeded) {
-      gaps.push({ area:'IR', needed:irNeeded, booked:cubeIR, gap:irNeeded-cubeIR, level:'info', msg:`IR: ${ir} slot committed, ${cubeIR} booked → keep IR-capable provider available.` });
-    }
-    if (cath > 0 && cubeCath === 1 && cathNeeded >= 2) {
-      gaps.push({ area:'CATH', needed:cathNeeded, booked:cubeCath, gap:0, level:'info', msg:`Cath Lab light today — consider pulling cath minor resource to main OR if short-staffed.` });
-    }
+    if (endoNeeded > 0 && cubeEndo < endoNeeded)     gaps.push({ area:'ENDO',    needed:endoNeeded,   booked:cubeEndo,   gap:endoNeeded-cubeEndo,     level:'warn',                   msg:`Endo: ${endo} rooms committed, ${cubeEndo} booked → ${endoNeeded-cubeEndo} unstaffed. Staff for inpatient add-ons.` });
+    if (cathNeeded > 0 && cubeCath < cathNeeded)     gaps.push({ area:'CATH',    needed:cathNeeded,   booked:cubeCath,   gap:cathNeeded-cubeCath,     level:'warn',                   msg:`Cath Lab: ${cath} slots committed, ${cubeCath} booked → ${cathNeeded-cubeCath} slot(s) for TEE/cardioversion/cath minor.` });
+    if (mainORNeeded > 0 && cubeMainOR < mainORNeeded) { const gap=mainORNeeded-cubeMainOR; gaps.push({ area:'MAIN OR', needed:mainORNeeded, booked:cubeMainOR, gap, level:gap>1?'critical':'warn', msg:`Main OR: ${mainOR} rooms committed, ${cubeMainOR} booked → ${gap} unbooked.${gap===1?' Includes add-on room — staff even with no cases.':' Includes add-on room + possible open heart coverage (OR 5).'}` }); }
+    if (boosNeeded > 0 && cubeBOOS < boosNeeded)     gaps.push({ area:'BOOS',    needed:boosNeeded,   booked:cubeBOOS,   gap:boosNeeded-cubeBOOS,     level:'info',                   msg:`BOOS: ${boos} rooms committed, ${cubeBOOS} booked → staff for add-ons.` });
+    if (irNeeded > 0 && cubeIR < irNeeded)           gaps.push({ area:'IR',      needed:irNeeded,     booked:cubeIR,     gap:irNeeded-cubeIR,         level:'info',                   msg:`IR: ${ir} slot committed, ${cubeIR} booked → keep IR-capable provider available.` });
+    if (cath > 0 && cubeCath === 1 && cathNeeded >= 2) gaps.push({ area:'CATH',  needed:cathNeeded,   booked:cubeCath,   gap:0,                       level:'info',                   msg:`Cath Lab light today — consider pulling cath minor resource to main OR if short-staffed.` });
 
     setFractionalPairs(pairs);
     setCoverageGaps(gaps);
     setResourceLoaded(true);
   }, [resourceStructure, rooms]);
 
-  const updateAssignment = useCallback((room, provider) => {
-    setRooms(prev => prev.map(r => r.room === room ? { ...r, assignedProvider: provider } : r));
+  // ── ASSIGNMENT UPDATE ─────────────────────────────────────────
+  // When a paired room's MD changes, sync the provider to its partner too.
+  const updateAssignment = useCallback((roomName, provider) => {
+    setRooms(prev => {
+      const pairedRoom = roomPairs[roomName];
+      return prev.map(r => {
+        if (r.room === roomName) return { ...r, assignedProvider: provider };
+        if (pairedRoom && r.room === pairedRoom) return { ...r, assignedProvider: provider };
+        return r;
+      });
+    });
+  }, [roomPairs]);
+
+  // ── PAIR MANAGEMENT ───────────────────────────────────────────
+  const createPair = useCallback((roomA, roomB) => {
+    if (roomA === roomB) return;
+    setRoomPairs(prev => {
+      const next = { ...prev };
+      // Break any existing pairs for these rooms first
+      Object.keys(next).forEach(k => {
+        if (next[k] === roomA || next[k] === roomB) delete next[k];
+      });
+      delete next[roomA];
+      delete next[roomB];
+      // Create new pair
+      next[roomA] = roomB;
+      next[roomB] = roomA;
+      return next;
+    });
+    // Sync provider: give paired room the same MD as the drag source
+    setRooms(prev => {
+      const sourceRoom = prev.find(r => r.room === roomA);
+      if (!sourceRoom?.assignedProvider) return prev;
+      return prev.map(r =>
+        r.room === roomB ? { ...r, assignedProvider: sourceRoom.assignedProvider } : r
+      );
+    });
+  }, []);
+
+  const breakPair = useCallback((roomName) => {
+    setRoomPairs(prev => {
+      const next = { ...prev };
+      const partner = next[roomName];
+      delete next[roomName];
+      if (partner) delete next[partner];
+      return next;
+    });
+  }, []);
+
+  // ── DRAG HANDLERS ─────────────────────────────────────────────
+  const handleDragStart = useCallback((e, roomName) => {
+    setDragSourceRoom(roomName);
+    e.dataTransfer.effectAllowed = 'link';
+    e.dataTransfer.setData('text/plain', roomName);
+  }, []);
+
+  const handleDragOver = useCallback((e, roomName) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'link';
+    setDragOverRoom(roomName);
+  }, []);
+
+  const handleDragLeave = useCallback(() => {
+    setDragOverRoom(null);
+  }, []);
+
+  const handleDrop = useCallback((e, targetRoom) => {
+    e.preventDefault();
+    const sourceRoom = e.dataTransfer.getData('text/plain') || dragSourceRoom;
+    setDragOverRoom(null);
+    setDragSourceRoom(null);
+    if (sourceRoom && targetRoom && sourceRoom !== targetRoom) {
+      createPair(sourceRoom, targetRoom);
+    }
+  }, [dragSourceRoom, createPair]);
+
+  const handleDragEnd = useCallback(() => {
+    setDragSourceRoom(null);
+    setDragOverRoom(null);
   }, []);
 
   const runAI = useCallback(async (prompt) => {
@@ -226,7 +335,9 @@ export default function App() {
     return rooms.flatMap(r => (r.flags||[]).filter(f=>f.level==='critical').map(f=>({...f,room:r.room})))
       .filter(f => { const key = `${f.room}:${f.msg}`; if (seen.has(key)) return false; seen.add(key); return true; });
   })();
+
   const today = new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+  const pairCount = Object.keys(roomPairs).length / 2;
 
   return (
     <div className="app">
@@ -242,9 +353,10 @@ export default function App() {
               : today}
           </div>
           <div className="header-status">
-            <span className={qgLoaded    ? 'status-ok' : 'status-off'}>● QGenda {qgLoaded    ? '✓' : '—'}</span>
-            <span className={schedLoaded ? 'status-ok' : 'status-off'}>● Schedule {schedLoaded ? '✓' : '—'}</span>
-            <span className={resourceLoaded ? 'status-ok' : 'status-off'}>● Resource {resourceLoaded ? '✓' : '—'}</span>
+            <span className={qgLoaded      ? 'status-ok' : 'status-off'}>● QGenda {qgLoaded      ? '✓' : '—'}</span>
+            <span className={schedLoaded   ? 'status-ok' : 'status-off'}>● Schedule {schedLoaded   ? '✓' : '—'}</span>
+            <span className={resourceLoaded? 'status-ok' : 'status-off'}>● Resource {resourceLoaded? '✓' : '—'}</span>
+            {pairCount > 0 && <span className="status-ok">⇄ {pairCount} pair{pairCount>1?'s':''}</span>}
             {qg?.aaBackupCall && <span className="status-crit">⚠ AA Backup Call</span>}
             {coverageGaps.filter(g=>g.level==='critical').length > 0 && <span className="status-crit">⚠ {coverageGaps.filter(g=>g.level==='critical').length} gap{coverageGaps.filter(g=>g.level==='critical').length>1?'s':''}</span>}
             {critFlags.length > 0 && <span className="status-crit">⚠ {critFlags.length} critical</span>}
@@ -272,14 +384,12 @@ export default function App() {
                 <div style={{marginBottom:'12px'}}>
                   <div style={{fontSize:'10px',color:'var(--accent-blue)',letterSpacing:'2px',marginBottom:'6px'}}>SELECT DATE TO BUILD</div>
                   <div style={{display:'flex',alignItems:'center',gap:'10px',flexWrap:'wrap'}}>
-                    <input
-                      type="date"
-                      value={selectedDate}
+                    <input type="date" value={selectedDate}
                       onChange={e => {
                         setSelectedDate(e.target.value);
                         setSchedLoaded(false); setQgLoaded(false); setRooms([]); setQg(null);
                         setResourceLoaded(false); setResourceBypassed(false);
-                        setCoverageGaps([]); setFractionalPairs([]);
+                        setCoverageGaps([]); setFractionalPairs([]); setRoomPairs({});
                       }}
                       style={{background:'var(--bg-base)',border:'1px solid var(--border-bright)',borderRadius:'var(--radius)',color:selectedDate?'var(--text-primary)':'var(--text-muted)',padding:'7px 12px',fontSize:'12px',fontFamily:'var(--font-mono)',cursor:'pointer',outline:'none'}}
                     />
@@ -287,9 +397,7 @@ export default function App() {
                   </div>
                   {!selectedDate && <div style={{fontSize:'10px',color:'var(--accent-amber)',marginTop:'5px'}}>⚠ Select a date first</div>}
                 </div>
-                <div className="card-hint">
-                  Enter today's row from the OR.Endo.CCL Resource Structure spreadsheet. Decimals allowed (e.g. 0.5). This is the source of truth for what we cover.
-                </div>
+                <div className="card-hint">Enter today's row from the OR.Endo.CCL Resource Structure spreadsheet. Decimals allowed (e.g. 0.5). This is the source of truth for what we cover.</div>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'10px'}}>
                   {[{key:'mainOR',label:'MAIN OR'},{key:'endo',label:'ENDO'},{key:'cath',label:'CATH LAB'},{key:'boos',label:'BOOS (Ortho AS)'},{key:'ir',label:'IR'}].map(({ key, label }) => (
                     <div key={key}>
@@ -304,9 +412,7 @@ export default function App() {
                   ))}
                 </div>
                 <div style={{display:'flex',gap:'8px'}}>
-                  <button className="btn" onClick={() => loadResourceStructure()} disabled={!selectedDate} style={{flex:1,opacity:selectedDate?1:0.5}}>
-                    CONFIRM COVERAGE
-                  </button>
+                  <button className="btn" onClick={() => loadResourceStructure()} disabled={!selectedDate} style={{flex:1,opacity:selectedDate?1:0.5}}>CONFIRM COVERAGE</button>
                   <button onClick={() => { setResourceBypassed(true); setResourceLoaded(false); setCoverageGaps([]); setFractionalPairs([]); }} disabled={!selectedDate}
                     style={{background:'var(--bg-elevated)',color:'var(--text-muted)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'9px 14px',fontSize:'10px',fontFamily:'var(--font-mono)',cursor:'pointer',opacity:selectedDate?1:0.5}}>
                     BYPASS
@@ -362,9 +468,7 @@ export default function App() {
                 <textarea className="textarea" value={qgRaw} onChange={e=>setQgRaw(e.target.value)}
                   placeholder={"Paste full week QGenda Calendar By Task export...\n\nOR Call\tEskew, Gregory S\nBack Up Call\tSingh, Karampal\nLocum\tNielson, Mark\n..."}
                   disabled={!stepsUnlocked} style={{opacity:stepsUnlocked?1:0.4}} />
-                <button className="btn" onClick={loadQG} style={{marginTop:'10px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>
-                  LOAD STAFFING
-                </button>
+                <button className="btn" onClick={loadQG} style={{marginTop:'10px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>LOAD STAFFING</button>
               </div>
 
               {qgLoaded && qg && (
@@ -379,7 +483,7 @@ export default function App() {
                   )}
                   {qg.workingMDs?.map(p => {
                     const isExp = expanded === `md-${p.name}`;
-                    const prof = PROVIDERS[p.name];
+                    const prof  = PROVIDERS[p.name];
                     return (
                       <div key={p.name} className="card provider-card" style={{borderLeft:`3px solid ${ROLE_COLORS[p.role]||'#475569'}`,marginBottom:'5px'}} onClick={()=>setExpanded(isExp?null:`md-${p.name}`)}>
                         <div className="provider-row">
@@ -444,16 +548,12 @@ export default function App() {
                 <textarea className="textarea" value={cubeRaw} onChange={e=>setCubeRaw(e.target.value)}
                   placeholder={"Paste entire cube schedule here — all dates, all areas.\nDate is set from Step 1.\n\nBMH OR\n4/14/2026 7:30 AM\tBMHOR-2026-701\tBMH OR 10\t..."}
                   disabled={!stepsUnlocked} style={{opacity:stepsUnlocked?1:0.4}} />
-                <button className="btn" onClick={loadSchedule} style={{marginTop:'10px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>
-                  LOAD SCHEDULE
-                </button>
+                <button className="btn" onClick={loadSchedule} style={{marginTop:'10px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>LOAD SCHEDULE</button>
               </div>
               {schedLoaded && (
                 <div style={{marginTop:'14px'}}>
                   {dateMismatch ? (
-                    <div className="flag-crit">
-                      ⚠ No cases found for {selectedDate?new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'}):'selected date'}. The cube data may not contain cases for this date yet.
-                    </div>
+                    <div className="flag-crit">⚠ No cases found for {selectedDate?new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'}):'selected date'}. The cube data may not contain cases for this date yet.</div>
                   ) : rooms.length > 0 ? (
                     <div>
                       <div className="section-label">
@@ -467,6 +567,9 @@ export default function App() {
                         })}
                         {rooms.filter(r=>r.blockRequired).length>0 && (
                           <div className="chip" style={{borderColor:'#f59e0b',color:'#f59e0b'}}>blocks: {rooms.filter(r=>r.blockRequired).length}</div>
+                        )}
+                        {pairCount > 0 && (
+                          <div className="chip" style={{borderColor:'#06b6d4',color:'#06b6d4'}}>⇄ {pairCount} pair{pairCount>1?'s':''}</div>
                         )}
                       </div>
                       {critFlags.map((f,i)=><div key={i} className="flag-crit">⚠ {f.room}: {f.msg}</div>)}
@@ -491,6 +594,20 @@ export default function App() {
               {(!schedLoaded||!qgLoaded) && <div className="warn-text">Load QGenda and schedule on Daily Board first</div>}
             </div>
 
+            {/* Pair mode instructions */}
+            {schedLoaded && rooms.length > 0 && (
+              <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'8px 14px',marginBottom:'12px',display:'flex',alignItems:'center',gap:'12px',flexWrap:'wrap'}}>
+                <span style={{fontSize:'10px',color:'var(--accent-blue)',letterSpacing:'1px',fontWeight:'600'}}>⇄ ROOM PAIRING</span>
+                <span style={{fontSize:'10px',color:'var(--text-muted)'}}>Drag one card onto another to pair them. Paired rooms share one provider (morning → afternoon). Click ✕ on a badge to break a pair.</span>
+                {pairCount > 0 && (
+                  <button onClick={() => setRoomPairs({})}
+                    style={{marginLeft:'auto',background:'transparent',border:'1px solid #475569',borderRadius:'var(--radius-sm)',color:'#64748b',fontSize:'9px',padding:'3px 8px',cursor:'pointer',fontFamily:'var(--font-mono)',letterSpacing:'1px'}}>
+                    CLEAR ALL PAIRS
+                  </button>
+                )}
+              </div>
+            )}
+
             {careTeamResult?.careTeams?.length > 0 && (
               <div style={{marginBottom:'16px'}}>
                 <div className="section-label">CARE TEAM SUMMARY</div>
@@ -500,6 +617,7 @@ export default function App() {
                       <div style={{fontSize:'10px',color:ct.color.text,fontWeight:'600',letterSpacing:'1px',marginBottom:'3px'}}>
                         {ct.color.label} — {ct.ratio}
                         {ct.hasReserve && <span style={{color:'var(--accent-amber)',marginLeft:'6px'}}>+ RESERVE</span>}
+                        {ct.isBOOS && <span style={{color:'#94a3b8',marginLeft:'6px'}}>BOOS</span>}
                       </div>
                       <div style={{fontSize:'11px',color:'var(--text-primary)'}}>{ct.md.split(',')[0]}</div>
                       <div style={{fontSize:'10px',color:'var(--text-secondary)',marginTop:'2px'}}>Rooms: {ct.rooms.join(', ')}</div>
@@ -540,44 +658,70 @@ export default function App() {
 
             <div className="room-grid">
               {rooms.map(room => {
-                const ac = ACUITY_COLORS[room.acuity]||'#475569';
-                const conflict = room.assignedProvider && room.avoidProviders?.includes(room.assignedProvider);
-                const isExp = expanded === `room-${room.room}`;
-                const ctColor = room.isCareTeam && room.careTeamId !== undefined
+                const ac         = ACUITY_COLORS[room.acuity]||'#475569';
+                const conflict   = room.assignedProvider && room.avoidProviders?.includes(room.assignedProvider);
+                const isExp      = expanded === `room-${room.room}`;
+                const ctColor    = room.isCareTeam && room.careTeamId !== undefined
                   ? CARE_TEAM_COLORS[room.careTeamId % CARE_TEAM_COLORS.length]
                   : null;
+                const pairedWith = roomPairs[room.room];
+                const isDragOver = dragOverRoom === room.room && dragSourceRoom !== room.room;
+                const isDragging = dragSourceRoom === room.room;
 
-                // ── Phantom room (Add-On Reserve) — distinct styling ──
+                // ── Phantom room ──────────────────────────────────────
                 if (room.isPhantom) {
                   return (
                     <div key={room.room} className="card room-card"
                       style={{borderLeft:'3px solid #f59e0b',borderColor:'#f59e0b',background:'#1a1400',opacity:0.85}}>
-                      {room.careTeamLabel && (
-                        <div style={{fontSize:'9px',color:'#fbbf24',letterSpacing:'1px',marginBottom:'5px',fontWeight:'600'}}>
-                          {room.careTeamLabel}
-                        </div>
-                      )}
+                      {room.careTeamLabel && <div style={{fontSize:'9px',color:'#fbbf24',letterSpacing:'1px',marginBottom:'5px',fontWeight:'600'}}>{room.careTeamLabel}</div>}
                       <div className="room-header">
                         <span className="room-name" style={{color:'#fbbf24'}}>{room.room}</span>
                         <span style={{fontSize:'9px',color:'#f59e0b',letterSpacing:'1px',fontWeight:'700'}}>RESERVED</span>
                       </div>
-                      <div style={{fontSize:'10px',color:'var(--text-muted)',marginTop:'4px',fontStyle:'italic'}}>
-                        No cases booked — reserved for inpatient add-ons per Resource Structure
-                      </div>
+                      <div style={{fontSize:'10px',color:'var(--text-muted)',marginTop:'4px',fontStyle:'italic'}}>No cases booked — reserved for inpatient add-ons per Resource Structure</div>
                       <div style={{marginTop:'8px'}}>
                         <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>ANESTHETIST RESERVED</div>
-                        <div style={{background:'var(--bg-base)',border:'1px solid #f59e0b',borderRadius:'var(--radius-sm)',padding:'5px 8px',fontSize:'11px',color:'#fbbf24'}}>
-                          {room.anesthetist || '—'}
-                        </div>
+                        <div style={{background:'var(--bg-base)',border:'1px solid #f59e0b',borderRadius:'var(--radius-sm)',padding:'5px 8px',fontSize:'11px',color:'#fbbf24'}}>{room.anesthetist || '—'}</div>
                       </div>
                     </div>
                   );
                 }
 
                 return (
-                  <div key={room.room} className="card room-card"
-                    style={{borderLeft:`3px solid ${ctColor ? ctColor.border : ac}`,borderColor:conflict?'#ef4444':ctColor?ctColor.border:'var(--border)',background:ctColor?ctColor.bg:'var(--bg-surface)'}}
-                    onClick={()=>setExpanded(isExp?null:`room-${room.room}`)}>
+                  <div key={room.room}
+                    className="card room-card"
+                    draggable
+                    onDragStart={e => handleDragStart(e, room.room)}
+                    onDragOver={e => handleDragOver(e, room.room)}
+                    onDragLeave={handleDragLeave}
+                    onDrop={e => handleDrop(e, room.room)}
+                    onDragEnd={handleDragEnd}
+                    style={{
+                      borderLeft: `3px solid ${pairedWith ? '#06b6d4' : ctColor ? ctColor.border : ac}`,
+                      borderColor: isDragOver ? '#06b6d4' : conflict ? '#ef4444' : pairedWith ? '#06b6d4' : ctColor ? ctColor.border : 'var(--border)',
+                      background: isDragOver ? '#0a1f2a' : isDragging ? 'var(--bg-elevated)' : ctColor ? ctColor.bg : 'var(--bg-surface)',
+                      outline: isDragOver ? '2px dashed #06b6d4' : 'none',
+                      opacity: isDragging ? 0.6 : 1,
+                      cursor: 'grab',
+                      transition: 'border-color 0.15s, background 0.15s, outline 0.15s',
+                    }}
+                    onClick={() => setExpanded(isExp ? null : `room-${room.room}`)}>
+
+                    {/* ── PAIR BADGE ─────────────────────────────────── */}
+                    {pairedWith && (
+                      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'5px'}}>
+                        <div style={{display:'inline-flex',alignItems:'center',gap:'5px',background:'#0c2030',border:'1px solid #06b6d4',borderRadius:'var(--radius-sm)',padding:'2px 7px'}}>
+                          <span style={{fontSize:'9px',color:'#06b6d4',fontWeight:'700',letterSpacing:'1px'}}>⇄ PAIRED</span>
+                          <span style={{fontSize:'9px',color:'#67e8f9'}}>→ {pairedWith}</span>
+                        </div>
+                        <button
+                          onClick={e => { e.stopPropagation(); breakPair(room.room); }}
+                          style={{background:'transparent',border:'none',color:'#475569',cursor:'pointer',fontSize:'12px',padding:'0 2px',lineHeight:1}}
+                          title="Break pair">
+                          ✕
+                        </button>
+                      </div>
+                    )}
 
                     {room.isCareTeam && room.careTeamLabel && (
                       <div style={{fontSize:'9px',color:ctColor?.text,letterSpacing:'1px',marginBottom:'5px',fontWeight:'600'}}>
@@ -598,11 +742,22 @@ export default function App() {
                     <div className="room-procedure">{room.cases?.map(c=>c.procedure).filter(Boolean).join(' → ') || ''}</div>
                     <div className="room-surgeon">{room.surgeons?.join(', ')}</div>
 
+                    {/* Drop target hint when dragging */}
+                    {isDragOver && (
+                      <div style={{fontSize:'10px',color:'#06b6d4',marginBottom:'4px',fontStyle:'italic'}}>
+                        Drop to pair with {dragSourceRoom}
+                      </div>
+                    )}
+
                     <div style={{marginBottom:'5px'}}>
-                      <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>ATTENDING MD</div>
-                      <select className="room-select" style={{borderColor:conflict?'#ef4444':ctColor?ctColor.border:'var(--border)'}}
-                        value={room.assignedProvider||''} onClick={e=>e.stopPropagation()}
-                        onChange={e=>{e.stopPropagation();updateAssignment(room.room,e.target.value);}}>
+                      <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>
+                        ATTENDING MD {pairedWith && <span style={{color:'#06b6d4'}}>— shared with {pairedWith}</span>}
+                      </div>
+                      <select className="room-select"
+                        style={{borderColor: conflict ? '#ef4444' : pairedWith ? '#06b6d4' : ctColor ? ctColor.border : 'var(--border)'}}
+                        value={room.assignedProvider||''}
+                        onClick={e => e.stopPropagation()}
+                        onChange={e => { e.stopPropagation(); updateAssignment(room.room, e.target.value); }}>
                         <option value="">— Unassigned —</option>
                         {qg?.workingMDs?.map(p=>(
                           <option key={p.name} value={p.name}>
@@ -655,6 +810,7 @@ export default function App() {
                     <div>
                       <span className="handoff-room">{r.room}</span>
                       {r.assignedProvider && <span className="handoff-provider">→ {r.assignedProvider}</span>}
+                      {roomPairs[r.room] && <span style={{fontSize:'9px',color:'#06b6d4',marginLeft:'6px'}}>⇄ {roomPairs[r.room]}</span>}
                     </div>
                     <select className="handoff-select" style={{color:handoffStatus[r.room]?STATUS_COLORS[handoffStatus[r.room]]:'var(--text-muted)'}}
                       value={handoffStatus[r.room]||''} onChange={e=>setHandoffStatus(p=>({...p,[r.room]:e.target.value}))}>
@@ -683,9 +839,16 @@ export default function App() {
               </div>
             </div>
             <button className="btn" onClick={()=>{
-              const active = Object.entries(handoffStatus).filter(([,v])=>v&&v!=='Done'&&v!=='Not Started').map(([room,status])=>{const r=rooms.find(x=>x.room===room);return `${room}(${status})${r?.assignedProvider?` — ${r.assignedProvider}`:''}`;}).join(', ')||'No statuses entered';
+              const active = Object.entries(handoffStatus).filter(([,v])=>v&&v!=='Done'&&v!=='Not Started').map(([room,status])=>{
+                const r=rooms.find(x=>x.room===room);
+                const pair=roomPairs[room];
+                return `${room}(${status})${r?.assignedProvider?` — ${r.assignedProvider}`:''}${pair?` [paired w/ ${pair}]`:''}`;
+              }).join(', ')||'No statuses entered';
               const ov = Object.entries(overrides).filter(([,v])=>v).map(([n,f])=>`${n}:${f}`).join(', ')||'None';
-              runAI(`Generate the 2pm afternoon handoff report.\nRoom statuses: ${active}\nProvider flags: ${ov}\n\nProvide:\n1. ONE-PAGE DECISION BRIEF for OR Call physician: what's still running, status, who needs relief and when, who to call next for add-ons, cardiac 4pm flags, late-stay options.\n2. FULL INFORMATIONAL LAYER: all providers still working with shift ends, complete relief order, location coverage plan 2pm-7pm, anesthetist shift ends, any coverage gaps.`);
+              const pairSummary = Object.keys(roomPairs).length > 0
+                ? `Paired rooms: ${Object.entries(roomPairs).filter(([a,b])=>a<b).map(([a,b])=>`${a} ⇄ ${b}`).join(', ')}`
+                : '';
+              runAI(`Generate the 2pm afternoon handoff report.\nRoom statuses: ${active}\nProvider flags: ${ov}\n${pairSummary}\n\nProvide:\n1. ONE-PAGE DECISION BRIEF for OR Call physician: what's still running, status, who needs relief and when, who to call next for add-ons, cardiac 4pm flags, late-stay options.\n2. FULL INFORMATIONAL LAYER: all providers still working with shift ends, complete relief order, location coverage plan 2pm-7pm, anesthetist shift ends, any coverage gaps.`);
             }}>GENERATE HANDOFF REPORT</button>
             {aiLoad && <div className="ai-loading">● Generating report...</div>}
             {aiError && <div className="flag-crit" style={{marginTop:'12px'}}>{aiError}</div>}
@@ -701,7 +864,7 @@ export default function App() {
             {['Employed MDs','Locum MDs','Cardiac MDs'].map(section => {
               const list = Object.entries(PROVIDERS).filter(([n,p]) => {
                 const matchSection = section==='Employed MDs'?p.employed&&!p.cardiac:section==='Locum MDs'?p.locum:p.cardiac;
-                const matchSearch = !provSearch||n.toLowerCase().includes(provSearch.toLowerCase())||(p.notes||'').toLowerCase().includes(provSearch.toLowerCase());
+                const matchSearch  = !provSearch||n.toLowerCase().includes(provSearch.toLowerCase())||(p.notes||'').toLowerCase().includes(provSearch.toLowerCase());
                 return matchSection && matchSearch;
               });
               if (!list.length) return null;
