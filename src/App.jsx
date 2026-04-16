@@ -505,11 +505,7 @@ export default function App() {
                   }.
                 </div>
                 <textarea className="textarea" value={cubeRaw} onChange={e=>setCubeRaw(e.target.value)}
-                  placeholder={"Paste entire cube schedule here — all dates, all areas.
-Date is set from Step 1.
-
-BMH OR
-4/14/2026 7:30 AM	BMHOR-2026-701	BMH OR 10	..."}
+                  placeholder={"Paste entire cube schedule here — all dates, all areas.\nDate is set from Step 1.\n\nBMH OR\n4/14/2026 7:30 AM\tBMHOR-2026-701\tBMH OR 10\t..."}
                   disabled={!stepsUnlocked}
                   style={{opacity:stepsUnlocked?1:0.4}}
                 />
