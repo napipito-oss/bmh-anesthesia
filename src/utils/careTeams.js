@@ -357,7 +357,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     }
   }
  
-  // All other solo rooms
+  // All other solo rooms (including IR — always solo, never care team)
   for (const room of soloRooms) {
     if (room.assignedProvider) continue;
     const md = mdPool.find(p => !room.avoidProviders?.includes(p.name)) || mdPool[0];
@@ -422,4 +422,3 @@ function sortAnesthetistsByVariety(anesthetists, area, history) {
     return aCount - bCount;
   });
 }
- 
