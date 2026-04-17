@@ -638,8 +638,9 @@ export function buildAssignments(rooms, qg, orCallChoice) {
  
   // IR — always solo, assign next available MD in priority order
   // IR has cell/wifi issues so care teams are not appropriate
+  // Check both isIR flag and building as belt-and-suspenders
   for (const room of result) {
-    if (room.assignedProvider || !room.isIR) continue;
+    if (room.assignedProvider || (!room.isIR && room.building !== 'IR')) continue;
     for (const provider of allMDs) {
       if (used.has(provider.name) || room.avoidProviders?.includes(provider.name)) continue;
       room.assignedProvider = provider.name;
