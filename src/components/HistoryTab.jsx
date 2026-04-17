@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ANESTHETIST_ROSTER } from '../data/providers.js';
 import {
   LOCATION_TYPES, MD_ASSIGNMENT_TYPES,
@@ -32,6 +32,18 @@ const S = {
   row: { display:'grid', gridTemplateColumns:'1fr 1fr 1fr 1fr auto', gap:'8px', alignItems:'end', marginBottom:'8px' },
 };
 
+// Map Claude's raw location string to a known LOCATION_TYPES value
+function normalizeLocation(raw) {
+  if (!raw) return 'main_or';
+  const s = raw.toLowerCase();
+  if (s.includes('endo'))            return 'endo';
+  if (s.includes('boos'))            return 'boos';
+  if (s.includes('cath') || s.includes('ep') || s.includes('cl')) return 'cath_ep';
+  if (s.includes('ir'))              return 'ir';
+  if (s.includes('cardiac') || s.includes('open heart')) return 'cardiac';
+  return 'main_or';
+}
+
 function emptyEntry() {
   return { anesthetist: '', location: '', room: '', mdDirecting: '', notes: '' };
 }
@@ -44,7 +56,19 @@ export default function HistoryTab({ qg }) {
   const [viewData, setViewData] = useState([]);
   const [saved, setSaved] = useState(false);
   const [locationCounts, setLocationCounts] = useState({});
-  const [activeView, setActiveView] = useState('entry'); // 'entry' | 'history' | 'stats'
+  const [activeView, setActiveView] = useState('entry'); // 'entry' | 'history' | 'stats' | 'import'
+
+  // ── Import state ──────────────────────────────────────────────
+  const [importDate, setImportDate] = useState('');
+  const [importImage, setImportImage] = useState(null);   // base64 data URL
+  const [importImageName, setImportImageName] = useState('');
+  const [importParsing, setImportParsing] = useState(false);
+  const [importEntries, setImportEntries] = useState([]);  // parsed rows, editable
+  const [importError, setImportError] = useState('');
+  const [importSaved, setImportSaved] = useState(false);
+  const [importConfidence, setImportConfidence] = useState(null);
+  const [importNotes, setImportNotes] = useState('');
+  const importFileRef = useRef(null);
 
   useEffect(() => {
     setSavedDates(getAllDates());
@@ -58,7 +82,6 @@ export default function HistoryTab({ qg }) {
   const handleSave = () => {
     if (!historyDate) return;
     const valid = entries.filter(e => e.anesthetist && e.location);
-    // Build room-like objects for the history saver
     const roomObjects = valid.map(e => ({
       room: e.room || e.location,
       isEndo: e.location === 'endo',
@@ -93,7 +116,131 @@ export default function HistoryTab({ qg }) {
     if (viewDate === date) { setViewDate(''); setViewData([]); }
   };
 
-  // Get anesthetists from QGenda if available, otherwise use known roster
+  // ── Import handlers ───────────────────────────────────────────
+  const handleImageUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportImageName(file.name);
+    setImportEntries([]);
+    setImportSaved(false);
+    setImportError('');
+    setImportConfidence(null);
+    const reader = new FileReader();
+    reader.onload = () => setImportImage(reader.result);
+    reader.readAsDataURL(file);
+  };
+
+  const runImportParse = async () => {
+    if (!importImage || !importDate) return;
+    setImportParsing(true);
+    setImportError('');
+    setImportEntries([]);
+    setImportSaved(false);
+    setImportConfidence(null);
+
+    try {
+      const base64Data = importImage.split(',')[1];
+      const mediaType  = importImage.split(';')[0].split(':')[1];
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1000,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } },
+              { type: 'text', text: `This is a handwritten anesthesia assignment day sheet from IU Health Ball Memorial Hospital for ${importDate}.
+
+Extract every row that shows an anesthetist (AA or CRNA) assigned to a room or location. Return ONLY valid JSON — no other text, no markdown.
+
+Format:
+{
+  "confidence": 0.0-1.0,
+  "readabilityNotes": "any issues reading the handwriting",
+  "rows": [
+    {
+      "anesthetist": "last name or full name as written",
+      "room": "room name as written (e.g. OR 7, Endo 2, BOOS 1, CL 2)",
+      "location": "main_or | endo | boos | cath_ep | ir | cardiac",
+      "mdDirecting": "attending MD last name if written next to this row, or null",
+      "notes": "any other note in this row, or null"
+    }
+  ]
+}
+
+Location rules:
+- OR 1-10 → main_or
+- Endo 1-3 → endo
+- BOOS OR 1-2 → boos
+- CL 2, CL 3, CL Minor, EP → cath_ep
+- IR, rIR → ir
+- Cardiac, Open Heart, OR 5 cardiac → cardiac
+
+If you cannot confidently read a name, write your best guess and lower the confidence score.` }
+            ]
+          }]
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message || 'API error');
+
+      const rawText = data.content?.map(c => c.text || '').join('').trim();
+      const clean   = rawText.replace(/```json|```/g, '').trim();
+      const parsed  = JSON.parse(clean);
+
+      setImportConfidence(parsed.confidence);
+      if (parsed.readabilityNotes) setImportNotes(parsed.readabilityNotes);
+
+      // Convert to editable entries using the same shape as manual entry
+      const rows = (parsed.rows || []).map(r => ({
+        anesthetist: r.anesthetist || '',
+        location: normalizeLocation(r.location),
+        room: r.room || '',
+        mdDirecting: r.mdDirecting || '',
+        notes: r.notes || '',
+      }));
+
+      setImportEntries(rows.length > 0 ? rows : [emptyEntry()]);
+    } catch (e) {
+      setImportError(e.message || 'Parse failed. Check image quality and try again.');
+    }
+
+    setImportParsing(false);
+  };
+
+  const updateImportEntry = (i, field, value) =>
+    setImportEntries(prev => prev.map((e, idx) => idx === i ? { ...e, [field]: value } : e));
+  const removeImportRow = (i) =>
+    setImportEntries(prev => prev.filter((_, idx) => idx !== i));
+  const addImportRow = () =>
+    setImportEntries(prev => [...prev, emptyEntry()]);
+
+  const handleSaveImport = () => {
+    if (!importDate) return;
+    const valid = importEntries.filter(e => e.anesthetist && e.location);
+    const roomObjects = valid.map(e => ({
+      room: e.room || e.location,
+      isEndo: e.location === 'endo',
+      isBOOS: e.location === 'boos',
+      isCathEP: e.location === 'cath_ep',
+      blockRequired: false,
+      isCardiac: e.location === 'cath_ep',
+      isCareTeam: e.mdDirecting ? true : false,
+      careTeamRatio: '1:3',
+      anesthetist: e.anesthetist,
+      assignedProvider: e.mdDirecting || null,
+    }));
+    saveFullDayHistory(importDate, roomObjects);
+    setSaved(s => !s);
+    setSavedDates(getAllDates());
+    setLocationCounts(getAnesthetistLocationCounts());
+    setImportSaved(true);
+  };
+
   const anesthetistList = qg?.Anesthetists?.filter(a => !a.isAdmin && !a.isOff).map(a => a.name).length > 0
     ? [...new Set([
         ...qg.Anesthetists.filter(a => !a.isAdmin && !a.isOff).map(a => a.name),
@@ -105,8 +252,13 @@ export default function HistoryTab({ qg }) {
     <div>
       {/* Sub-navigation */}
       <div style={{display:'flex',gap:'4px',marginBottom:'20px',borderBottom:'1px solid var(--border)',paddingBottom:'0'}}>
-        {[['entry','ENTER HISTORY'],['history','VIEW HISTORY'],['stats','ANESTHETIST STATS']].map(([id,label]) => (
-          <button key={id} onClick={()=>setActiveView(id)} style={{
+        {[
+          ['entry',  'ENTER HISTORY'],
+          ['import', 'IMPORT FROM SCAN'],
+          ['history','VIEW HISTORY'],
+          ['stats',  'ANESTHETIST STATS'],
+        ].map(([id, label]) => (
+          <button key={id} onClick={() => setActiveView(id)} style={{
             background: activeView===id ? 'var(--bg-elevated)' : 'transparent',
             color: activeView===id ? 'var(--accent-blue)' : 'var(--text-muted)',
             border:'none', borderBottom: activeView===id ? '2px solid var(--accent-blue)' : '2px solid transparent',
@@ -131,7 +283,6 @@ export default function HistoryTab({ qg }) {
               </span>}
             </div>
 
-            {/* Column headers */}
             <div style={{...S.row, marginBottom:'4px'}}>
               <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>ANESTHETIST</span>
               <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>LOCATION TYPE</span>
@@ -165,9 +316,7 @@ export default function HistoryTab({ qg }) {
 
             <div style={{display:'flex',gap:'8px',marginTop:'12px'}}>
               <button style={S.btnSm} onClick={addRow}>+ Add Row</button>
-              <button style={S.btn} onClick={handleSave} disabled={!historyDate}>
-                SAVE HISTORY
-              </button>
+              <button style={S.btn} onClick={handleSave} disabled={!historyDate}>SAVE HISTORY</button>
             </div>
           </div>
 
@@ -181,6 +330,143 @@ export default function HistoryTab({ qg }) {
                     <button style={S.btnDanger} onClick={()=>handleDelete(d)}>✕</button>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* IMPORT FROM SCAN TAB */}
+      {activeView === 'import' && (
+        <div>
+          <span style={S.label}>IMPORT FROM HANDWRITTEN DAY SHEET</span>
+          <div style={{...S.card, marginBottom:'16px'}}>
+            <div style={{fontSize:'10px',color:'var(--text-muted)',marginBottom:'14px',lineHeight:'1.6'}}>
+              Upload a photo or scan of Jenni's day sheet. Claude will read the handwriting and pre-fill the rows below for review before saving.
+            </div>
+
+            {/* Date + file upload row */}
+            <div style={{display:'grid',gridTemplateColumns:'160px 1fr',gap:'12px',marginBottom:'14px',alignItems:'end'}}>
+              <div>
+                <span style={{...S.label, marginBottom:'4px'}}>DATE</span>
+                <input type="date" value={importDate}
+                  onChange={e => { setImportDate(e.target.value); setImportSaved(false); }}
+                  style={{...S.select, width:'100%'}} />
+              </div>
+              <div>
+                <span style={{...S.label, marginBottom:'4px'}}>DAY SHEET IMAGE</span>
+                <input ref={importFileRef} type="file" accept="image/*" onChange={handleImageUpload} style={{display:'none'}} />
+                <button onClick={() => importFileRef.current?.click()}
+                  style={{
+                    width:'100%', background:'var(--bg-base)',
+                    border: `1px dashed ${importImage ? '#22c55e' : 'var(--border)'}`,
+                    borderRadius:'var(--radius)', color: importImage ? '#4ade80' : 'var(--text-muted)',
+                    padding:'9px 12px', fontSize:'10px', fontFamily:'var(--font-mono)',
+                    cursor:'pointer', letterSpacing:'1px', textAlign:'left',
+                  }}>
+                  {importImage ? `✓  ${importImageName}` : '+ CLICK TO UPLOAD SCAN (JPG / PNG)'}
+                </button>
+              </div>
+            </div>
+
+            {/* Image preview */}
+            {importImage && (
+              <img src={importImage} alt="Day sheet preview"
+                style={{width:'100%',maxHeight:'220px',objectFit:'contain',borderRadius:'var(--radius)',border:'1px solid var(--border)',background:'#111',marginBottom:'14px'}}
+              />
+            )}
+
+            <button style={{...S.btn, opacity:(!importImage||!importDate||importParsing)?0.45:1}}
+              onClick={runImportParse}
+              disabled={!importImage || !importDate || importParsing}>
+              {importParsing ? '● READING HANDWRITING...' : 'PARSE WITH AI VISION'}
+            </button>
+
+            {importError && (
+              <div style={{background:'#450a0a',border:'1px solid #ef4444',borderRadius:'var(--radius)',padding:'9px 12px',marginTop:'10px',fontSize:'10px',color:'#fca5a5'}}>
+                ⚠ {importError}
+              </div>
+            )}
+          </div>
+
+          {/* Parsed results — editable before saving */}
+          {importEntries.length > 0 && importEntries[0].anesthetist !== '' && (
+            <div>
+              {/* Confidence + notes banner */}
+              {importConfidence !== null && (
+                <div style={{
+                  background: importConfidence >= 0.8 ? '#0f2a1e' : importConfidence >= 0.6 ? '#2a1a00' : '#450a0a',
+                  border: `1px solid ${importConfidence >= 0.8 ? '#22c55e' : importConfidence >= 0.6 ? '#f59e0b' : '#ef4444'}`,
+                  borderRadius:'var(--radius)', padding:'9px 14px', marginBottom:'12px',
+                  display:'flex', gap:'16px', alignItems:'flex-start',
+                }}>
+                  <div>
+                    <span style={{fontSize:'9px',letterSpacing:'1px',fontWeight:'600',color: importConfidence >= 0.8 ? '#4ade80' : importConfidence >= 0.6 ? '#fbbf24' : '#f87171'}}>
+                      {importConfidence >= 0.8 ? '✓ HIGH CONFIDENCE' : importConfidence >= 0.6 ? '⚠ MEDIUM CONFIDENCE' : '⚠ LOW CONFIDENCE'} — {Math.round(importConfidence * 100)}%
+                    </span>
+                    {importNotes && <div style={{fontSize:'10px',color:'var(--text-secondary)',marginTop:'3px'}}>{importNotes}</div>}
+                  </div>
+                  <div style={{marginLeft:'auto',fontSize:'10px',color:'var(--text-muted)',whiteSpace:'nowrap'}}>
+                    Review and correct rows before saving
+                  </div>
+                </div>
+              )}
+
+              <span style={S.label}>REVIEW EXTRACTED ROWS — {importEntries.length} FOUND</span>
+              <div style={{...S.card, marginBottom:'12px'}}>
+                <div style={{...S.row, marginBottom:'4px'}}>
+                  <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>ANESTHETIST</span>
+                  <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>LOCATION TYPE</span>
+                  <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>ROOM</span>
+                  <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>MD DIRECTING</span>
+                  <span></span>
+                </div>
+
+                {importEntries.map((entry, i) => (
+                  <div key={i} style={S.row}>
+                    {/* Free-text input for anesthetist — vision may return partial names */}
+                    <input
+                      list={`anest-list-${i}`}
+                      style={{...S.select}}
+                      value={entry.anesthetist}
+                      onChange={e => updateImportEntry(i, 'anesthetist', e.target.value)}
+                      placeholder="Anesthetist name"
+                    />
+                    <datalist id={`anest-list-${i}`}>
+                      {anesthetistList.map(a => <option key={a} value={a} />)}
+                    </datalist>
+                    <select style={S.select} value={entry.location} onChange={e=>updateImportEntry(i,'location',e.target.value)}>
+                      <option value="">— Location —</option>
+                      {LOCATION_TYPES.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
+                    </select>
+                    <select style={S.select} value={entry.room} onChange={e=>updateImportEntry(i,'room',e.target.value)}>
+                      <option value="">— Room —</option>
+                      {ROOMS.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                    <input
+                      list={`md-list-${i}`}
+                      style={{...S.select}}
+                      value={entry.mdDirecting}
+                      onChange={e => updateImportEntry(i, 'mdDirecting', e.target.value)}
+                      placeholder="MD (if care team)"
+                    />
+                    <datalist id={`md-list-${i}`}>
+                      {MDS.map(m => <option key={m} value={m} />)}
+                    </datalist>
+                    <button style={S.btnDanger} onClick={()=>removeImportRow(i)}>✕</button>
+                  </div>
+                ))}
+
+                <div style={{display:'flex',gap:'8px',marginTop:'12px',alignItems:'center'}}>
+                  <button style={S.btnSm} onClick={addImportRow}>+ Add Row</button>
+                  {!importSaved ? (
+                    <button style={S.btn} onClick={handleSaveImport} disabled={!importDate}>
+                      SAVE TO HISTORY
+                    </button>
+                  ) : (
+                    <span style={{fontSize:'10px',color:'#4ade80',letterSpacing:'1px',fontWeight:'600'}}>✓ SAVED — visible in View History and Stats</span>
+                  )}
+                </div>
               </div>
             </div>
           )}
