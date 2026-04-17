@@ -75,6 +75,11 @@ function needsAnesthesia(procedure, surgeon, room) {
   if (proc.includes('watchman'))
     return { needs: true, reason: 'Watchman — always needs anesthesia', cardiac: true };
  
+  // IR room or cryoablation — always needs anesthesia, checked BEFORE EP logic
+  // because 'cryoablation' contains 'ablation' which triggers the EP exclusion path
+  if (classifyRoom(room).isIR || proc.includes('cryoablation'))
+    return { needs: true, reason: 'IR/cryoablation — always needs anesthesia' };
+ 
   const isEP =
     proc.includes('ep study') || proc.includes('electrophysiology') ||
     proc.includes('ablation') || proc.includes('afib') || proc.includes('a fib') ||
@@ -98,8 +103,7 @@ function needsAnesthesia(procedure, surgeon, room) {
     return { needs: true, reason: `Device case — ${surgLast} preference unknown`, flag: true, cardiac: true };
   }
  
-  if (classifyRoom(room).isIR || proc.includes('cryoablation'))
-    return { needs: true, reason: 'IR case — needs anesthesia' };
+  // IR/cryoablation check moved above EP logic
  
   return { needs: true, reason: 'Standard case' };
 }
@@ -663,4 +667,3 @@ export function buildAssignments(rooms, qg, orCallChoice) {
   // Remaining rooms left unassigned — buildCareTeams handles them
   return result;
 }
- 
