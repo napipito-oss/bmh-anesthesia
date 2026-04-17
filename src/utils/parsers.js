@@ -640,19 +640,6 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     if (brand) { room.assignedProvider = brand.name; used.add(brand.name); }
   }
  
-  // IR — always solo, assign next available MD in priority order
-  // IR has cell/wifi issues so care teams are not appropriate
-  // Check both isIR flag and building as belt-and-suspenders
-  for (const room of result) {
-    if (room.assignedProvider || (!room.isIR && room.building !== 'IR')) continue;
-    for (const provider of allMDs) {
-      if (used.has(provider.name) || room.avoidProviders?.includes(provider.name)) continue;
-      room.assignedProvider = provider.name;
-      used.add(provider.name);
-      break;
-    }
-  }
- 
   // Peds — DeWitt first (employed, peds-capable), then locums capable of peds, then Pipito
   // Pipito is backup call (#2) so locums should be exhausted before pulling him for peds
   const pedsOrder = ['DeWitt, Bracken J', 'Gathings, Vincent', 'Nielson, Mark', 'Pipito, Nicholas A'];
