@@ -351,11 +351,18 @@ export default function App() {
   finishRef.current = finishBuildingSchedule;
 
   const loadSchedule = useCallback(() => {
-    // Pass resourceStructure so parseCubeData can enforce the Main OR ceiling.
-    // If resource was bypassed (resourceBypassed=true, resourceStructure empty),
-    // parseCubeData receives null and skips the ceiling trim.
-    const rs = resourceLoaded ? resourceStructure : null;
-    const parsed = parseCubeData(cubeRaw, selectedDate, rs);
+    // Pass committed room counts from OR.endo.CCL:
+    //  - Main OR: trims excess rooms if cube exceeds committed
+    //  - Cath: generates Cath Lab Add-On phantom rooms if committed > cube visible
+    // Undefined is passed for any value that is 0/empty (Step 1 bypassed etc.)
+    const mainORCommitted = parseFloat(resourceStructure.mainOR) || 0;
+    const cathCommitted   = parseFloat(resourceStructure.cath)   || 0;
+    const parsed = parseCubeData(
+      cubeRaw,
+      selectedDate,
+      mainORCommitted > 0 ? Math.ceil(mainORCommitted) : undefined,
+      cathCommitted   > 0 ? Math.ceil(cathCommitted)   : undefined
+    );
     setDateMismatch(selectedDate && parsed.totalParsed === 0);
     setPendingRooms(parsed.rooms);
     setSchedLoaded(true);
@@ -364,7 +371,7 @@ export default function App() {
     } else {
       finishRef.current(parsed.rooms, null);
     }
-  }, [cubeRaw, qg, selectedDate, resourceLoaded, resourceStructure]);
+  }, [cubeRaw, qg, selectedDate, resourceStructure.mainOR, resourceStructure.cath]);
 
   const handleORCallConfirm = useCallback((choice) => {
     setShowORCallPrompt(false);
