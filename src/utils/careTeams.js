@@ -1,13 +1,23 @@
 // ─────────────────────────────────────────────────────────────
-// CARE TEAM ENGINE — v3.2
-// Based on v3.1 (last confirmed working state)
-// Changes from v3.1:
-//   - unassignedRooms excludes isORCallChoice rooms (Eskew fix)
+// CARE TEAM ENGINE — v3.4
+// v3.2:
+//   - unassignedRooms excludes isORCallChoice rooms
 //   - globalUsed includes OR Call choice provider
 //   - remainingMDs in solo pass sorted by priority order
-//     (Locums → Back Up Call → Rank 3+) so Watkins/Siddiqui
-//     are assigned before Pipito, Pipito before Raghove
 //   - Watkins added to CARE_TEAM_COMFORTABLE
+// v3.4:
+//   - ctMDs NO LONGER filtered by CARE_TEAM_COMFORTABLE.
+//     The "locums before backup call" rule is absolute. Every MD takes
+//     rooms in strict priority order. CARE_TEAM_COMFORTABLE now only
+//     gates whether the MD gets anesthetists (1:2/1:3) vs solo (1:1).
+//   - Endo phantom add-on room restored: if committedEndo > cube rooms,
+//     generate phantom Endo Add-On Room(s) to reach committed count.
+// v3.5:
+//   - Cath Lab Add-On fallback pass added. Cath rooms (real or phantom)
+//     that didn't get a CV MD from cardiacDecisionTree now fill from
+//     standard priority: Locums → Backup Call → Rank 3+. Without this,
+//     unassigned cath phantoms disappeared into a hole (excluded from
+//     preAssigned, mainRooms, and soloRooms all at once).
 // ─────────────────────────────────────────────────────────────
 import { classifyRoom } from './parsers.js';
  
@@ -165,83 +175,138 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   anesthetistPool = sortAnesthetistsByVariety(anesthetistPool, 'endo', anesthetistHistory);
  
   // ── Care Team A: Brand → Endo ─────────────────────────────────
-  // OR.endo.CCL is the source of truth for how many endo rooms we cover.
-  // The cube only tells us which rooms have cases — it never determines room count.
-  // committedEndo = number from OR.endo.CCL. We staff exactly that many rooms.
-  // No phantom rooms generated — the OR.endo.CCL number already accounts for
-  // add-on capacity. If cube shows fewer rooms, those got consolidated; not our concern.
-  if (brandMD && !usedMDs.has(brandMD.name) && endoRooms.length > 0) {
-    const committedEndo  = Math.min(Math.ceil(parseFloat(resourceStructure.endo) || 0), 3);
-    // Staff the visible cube rooms, up to committedEndo. Never generate extra rooms.
-    const endoRoomCount  = Math.min(endoRooms.length, Math.max(endoRooms.length, committedEndo));
-    const roomsToAssign  = endoRooms.slice(0, endoRoomCount);
-    const endoAnests     = anesthetistPool.splice(0, endoRoomCount);
+  // OR.endo.CCL is BOTH the floor AND the ceiling for endo rooms we cover.
+  //   - If cube shows FEWER rooms than committed, generate Endo Add-On Room(s)
+  //     to fill up to the committed count — those are the add-on rooms the
+  //     department holds open for inpatient adds.
+  //   - If cube shows EQUAL or MORE rooms than committed, we staff exactly
+  //     the committed count (no excess).
+  //   - If committed is 0, we staff no endo rooms even if cube shows cases.
+  const committedEndo = Math.min(Math.ceil(parseFloat(resourceStructure.endo) || 0), 3);
+  if (brandMD && !usedMDs.has(brandMD.name) && committedEndo > 0) {
+    // How many visible (cube) endo rooms we'll use: capped at committed
+    const visibleCount  = Math.min(endoRooms.length, committedEndo);
+    const visibleToUse  = endoRooms.slice(0, visibleCount);
+    // How many phantom Add-On rooms to generate to reach committed
+    const phantomCount  = committedEndo - visibleCount;
+    const totalRooms    = committedEndo;
+    const endoAnests    = anesthetistPool.splice(0, totalRooms);
  
-    const endoAssignment = roomsToAssign.map((room, i) => ({
+    // Real (cube) endo rooms — update in place
+    const visibleAssignment = visibleToUse.map((room, i) => ({
       ...room,
       assignedProvider: brandMD.name,
       anesthetist:   endoAnests[i]?.name || null,
       careTeamId:    0,
-      careTeamLabel: `Care Team 1 — Brand 1:${endoRoomCount}`,
-      careTeamRatio: `1:${endoRoomCount}`,
+      careTeamLabel: `Care Team 1 — Brand 1:${totalRooms}`,
+      careTeamRatio: `1:${totalRooms}`,
       isCareTeam:    true,
     }));
  
+    // Phantom add-on rooms — fresh room objects appended to the rooms array
+    const phantomRooms = Array.from({ length: phantomCount }, (_, i) => ({
+      room:            phantomCount === 1 ? 'Endo Add-On Room' : `Endo Add-On Room ${i + 1}`,
+      area:            'BMH ENDO',
+      building:        'ENDO_FLOOR',
+      isEndo:          true,
+      isCareTeam:      true,
+      isPhantom:       true,
+      acuity:          'routine',
+      cases:           [],
+      caseCount:       0,
+      surgeons:        [],
+      flags:           [{ level: 'info', msg: 'Endo Add-On Room — reserved per OR.endo.CCL, no cases booked yet' }],
+      assignedProvider: brandMD.name,
+      anesthetist:      endoAnests[visibleCount + i]?.name || null,
+      careTeamId:       0,
+      careTeamLabel:    `Care Team 1 — Brand 1:${totalRooms}`,
+      careTeamRatio:    `1:${totalRooms}`,
+      caseStatus:       'Not Started',
+      cardiacNote:      '',
+      blockRequired:    false,
+      blockPossible:    false,
+      preferredProviders: [],
+      avoidProviders:   [],
+      manuallyAdded:    false,
+    }));
+ 
     careTeams.push({
-      id: 0, md: brandMD.name, ratio: `1:${endoRoomCount}`,
-      rooms: endoAssignment.map(r => r.room),
+      id: 0, md: brandMD.name, ratio: `1:${totalRooms}`,
+      rooms: [...visibleAssignment.map(r => r.room), ...phantomRooms.map(r => r.room)],
       anesthetists: endoAnests.map(a => a.name),
       color: CARE_TEAM_COLORS[0],
-      hasReserve: false,
+      hasReserve: phantomCount > 0,
     });
  
     usedMDs.add(brandMD.name);
     endoAnests.forEach(a => usedAnesthetists.add(a.name));
     if (remainingRatios.length > 0) remainingRatios.shift();
  
-    roomsToAssign.forEach((room, i) => {
+    // Update real rooms in place
+    visibleToUse.forEach((room, i) => {
       const idx = rooms.findIndex(r => r.room === room.room);
-      if (idx >= 0) rooms[idx] = endoAssignment[i];
+      if (idx >= 0) rooms[idx] = visibleAssignment[i];
     });
+    // Append phantom rooms
+    phantomRooms.forEach(pr => rooms.push(pr));
   }
  
   // ── Care Teams B+: Main OR ────────────────────────────────────
-  // ctMDs preserves availableMDs priority order — no re-sorting
-  // CARE_TEAM_COMFORTABLE still controls whether anesthetists are assigned
-  const ctMDs = availableMDs.filter(p => !usedMDs.has(p.name) && CARE_TEAM_COMFORTABLE.includes(p.name));
+  // CRITICAL: ctMDs is NOT filtered by CARE_TEAM_COMFORTABLE.
+  // Every MD gets rooms in strict priority order (Locums → Backup Call → Rank 3+).
+  // Filtering by care-team comfort here would let a backup call physician be
+  // pulled into a care team before a locum who isn't care-team-comfortable gets
+  // a solo room — violating the "locums before backup call" rule.
+  // CARE_TEAM_COMFORTABLE is checked LATER when deciding whether to attach
+  // anesthetists (making it a real 1:2/1:3 care team) vs leave the MD solo.
+  const ctMDs = availableMDs.filter(p => !usedMDs.has(p.name));
  
   let ctIdx    = 1;
   let roomPool = [...scoredMain.filter(r => roomCareTeamSuitability(r) !== 'avoid')];
  
   for (const ratio of remainingRatios) {
     if (ctMDs.length === 0 || roomPool.length === 0) break;
-    const actualRatio = Math.min(ratio, roomPool.length);
-    if (actualRatio === 0) break;
- 
     const md = ctMDs.shift();
     if (!md || usedMDs.has(md.name)) continue;
  
+    // Check if THIS MD is care-team-comfortable.
+    // If yes → form a care team (1:2 or 1:3 with anesthetists).
+    // If no → they take ONE room solo (1:1, no anesthetist attached).
+    // Either way, this MD got a room — we never skip them to keep priority order.
+    const mdComfortable = CARE_TEAM_COMFORTABLE.includes(md.name);
+    const desiredRatio  = mdComfortable ? ratio : 1;
+    const actualRatio   = Math.min(desiredRatio, roomPool.length);
+    if (actualRatio === 0) { usedMDs.add(md.name); continue; }
+ 
     const ctRooms = pickStaggeredRooms(roomPool, actualRatio);
-    if (ctRooms.length === 0) break;
+    if (ctRooms.length === 0) { usedMDs.add(md.name); continue; }
  
     ctRooms.forEach(r => { roomPool = roomPool.filter(x => x.room !== r.room); });
  
-    const sortedAnests = sortAnesthetistsByVariety(
-      anesthetistPool.filter(a => !usedAnesthetists.has(a.name)),
-      'main', anesthetistHistory
-    );
-    const ctAnests = sortedAnests.splice(0, actualRatio);
-    ctAnests.forEach(a => usedAnesthetists.add(a.name));
-    anesthetistPool = anesthetistPool.filter(a => !usedAnesthetists.has(a.name));
+    // Only attach anesthetists if this MD is care-team-comfortable.
+    // Non-comfortable MDs run solo (no AA attached at this stage).
+    let ctAnests = [];
+    if (mdComfortable) {
+      const sortedAnests = sortAnesthetistsByVariety(
+        anesthetistPool.filter(a => !usedAnesthetists.has(a.name)),
+        'main', anesthetistHistory
+      );
+      ctAnests = sortedAnests.splice(0, actualRatio);
+      ctAnests.forEach(a => usedAnesthetists.add(a.name));
+      anesthetistPool = anesthetistPool.filter(a => !usedAnesthetists.has(a.name));
+    }
  
     const color     = CARE_TEAM_COLORS[ctIdx % CARE_TEAM_COLORS.length];
-    const teamLabel = `Care Team ${ctIdx + 1} — ${md.name.split(',')[0]} 1:${actualRatio}`;
+    const teamLabel = mdComfortable
+      ? `Care Team ${ctIdx + 1} — ${md.name.split(',')[0]} 1:${actualRatio}`
+      : `${md.name.split(',')[0]} — Solo`;
  
     careTeams.push({
-      id: ctIdx, md: md.name, ratio: `1:${actualRatio}`,
+      id: ctIdx, md: md.name, ratio: mdComfortable ? `1:${actualRatio}` : '1:1 (Solo)',
       rooms: ctRooms.map(r => r.room),
       anesthetists: ctAnests.map(a => a.name),
       color,
+      isSolo: !mdComfortable,
     });
     usedMDs.add(md.name);
  
@@ -252,10 +317,10 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
           ...rooms[idx],
           assignedProvider: md.name,
           anesthetist:   ctAnests[i]?.name || null,
-          careTeamId:    ctIdx,
-          careTeamLabel: teamLabel,
-          careTeamRatio: `1:${actualRatio}`,
-          isCareTeam:    true,
+          careTeamId:    mdComfortable ? ctIdx : undefined,
+          careTeamLabel: mdComfortable ? teamLabel : null,
+          careTeamRatio: mdComfortable ? `1:${actualRatio}` : null,
+          isCareTeam:    mdComfortable,
         };
       }
     });
@@ -315,11 +380,6 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     .filter(a => !usedAnesthetists.has(a.name))
     .slice(0, floatCount);
  
-  // ── Solo fill ─────────────────────────────────────────────────
-  const soloRooms = rooms.filter(r =>
-    !r.isCareTeam && !r.isCardiac && !r.isCathEP && !r.isPhantom
-  );
- 
   // Sort remaining MDs in strict priority order: Locums → Backup Call → Rank 3+
   const allAssignedNow = new Set([...soloUsed, ...usedMDs]);
   const remainingMDs = [
@@ -331,6 +391,38 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   ].filter(p => !allAssignedNow.has(p.name));
  
   let mdPool = [...remainingMDs];
+ 
+  // ── Cath fallback ─────────────────────────────────────────────
+  // Cath rooms (real or phantom) left unassigned by cardiacDecisionTree
+  // (because CV team was occupied by Tier 1/2 cases elsewhere) get
+  // filled here from standard priority. Must run BEFORE solo fill so
+  // these rooms get providers before general main-OR solo rooms consume the pool.
+  const unassignedCathRooms = rooms.filter(r => r.isCathEP && !r.assignedProvider);
+  for (const room of unassignedCathRooms) {
+    const md = mdPool.find(p => !room.avoidProviders?.includes(p.name)) || mdPool[0];
+    if (md) {
+      const idx = rooms.findIndex(r => r.room === room.room);
+      if (idx >= 0) {
+        rooms[idx] = {
+          ...rooms[idx],
+          assignedProvider: md.name,
+          anesthetist: null,
+          isCareTeam: false,
+          careTeamLabel: null,
+          cardiacNote: rooms[idx].cardiacNote || 'General fill — CV team occupied',
+        };
+      }
+      mdPool = mdPool.filter(p => p.name !== md.name);
+      usedMDs.add(md.name);
+    }
+  }
+ 
+  // ── Solo fill ─────────────────────────────────────────────────
+  // Cath rooms already handled above. Phantoms (including the Endo phantom
+  // created earlier in this function) already have providers assigned.
+  const soloRooms = rooms.filter(r =>
+    !r.isCareTeam && !r.isCardiac && !r.isCathEP && !r.isPhantom
+  );
  
   // BOOS block rooms — regional MD first
   for (const room of soloRooms.filter(r => r.isBOOS && boosNeedsPeripheralBlock(r))) {
