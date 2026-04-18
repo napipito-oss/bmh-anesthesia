@@ -1,15 +1,36 @@
 // ─────────────────────────────────────────────────────────────
-// PARSING UTILITIES — v4.2
-// Fixes:
+// PARSING UTILITIES — v5.0
+//
+// Fixes in this version (all new since v4.2):
+//   1. QGenda parser now recognizes DATE lines (e.g. "April 20, 2026")
+//      as the day trigger — previously only weekday names triggered
+//      inTargetDay, so data without explicit day names was ignored.
+//   2. BMH WL / "add-on" rooms are NO LONGER relabeled or rendered.
+//      WL entries are filtered out of the cube entirely — no phantom
+//      "BMH OR Add-On Room" card is created.
+//   3. CardioMEMS procedures excluded (RN-administered sedation).
+//   4. Dr. Alalwan's cases excluded (all RN-administered sedation).
+//   5. OR.endo.CCL is the hard ceiling for Main OR count. When cube
+//      shows more main OR rooms than committed, rooms are trimmed
+//      (lowest-priority rooms dropped) to respect the commitment.
+//
+// Carried forward from v4.2:
 //   - OB Call excluded from workingMDs entirely
 //   - OR Call provider removed from fill order after choice applied
-//     (prevents double-assignment e.g. Eskew in 2 rooms)
-//   - BMH WL → "BMH OR Add-On Room" (consistent label)
 // ─────────────────────────────────────────────────────────────
 import { SURGEON_BLOCKS } from '../data/surgeons.js';
  
 const EP_ANES_SURGEONS = ['Rose', 'Almnajam'];
 const NO_DEVICE_ANES_SURGEONS = ['Moran', 'Graham', 'Rivera Maza', 'Wagle', 'Saleb', 'Madmani'];
+ 
+// Procedures we never cover — RN-administered sedation or no sedation needed.
+// Excluded from case count and acuity. If a room contains ONLY excluded cases,
+// the room is dropped from assignments entirely.
+const NO_ANESTHESIA_PROCEDURES = ['cardiomems', 'cardiomem'];
+ 
+// Surgeons whose cases we never cover — RN-administered sedation for all cases.
+// Same exclusion logic: cases filtered out, rooms dropped if all cases excluded.
+const NO_ANESTHESIA_SURGEONS = ['Alalwan'];
  
 export function classifyRoom(roomStr) {
   const r = (roomStr || '').toLowerCase();
@@ -18,7 +39,7 @@ export function classifyRoom(roomStr) {
   const isCathEP = r.includes('cl ') || r.includes('cath') ||
     r.includes('yanes') || r.includes('ep lab') || r.includes('ep ');
   const isBOOS   = r.includes('boos');
-  const isAddOn  = /\bwl\b/i.test(roomStr || '');   // tightened: word-boundary match
+  const isAddOn  = /\bwl\b/i.test(roomStr || '');
   const isMainOR = !isIR && !isEndo && !isCathEP && !isBOOS;
  
   let building;
@@ -38,6 +59,14 @@ function needsAnesthesia(procedure, surgeon, room) {
  
   if (rm.includes('zno anes') || rm.includes('z no anes') || proc.includes('zno anes'))
     return { needs: false, reason: 'No anesthesia room' };
+ 
+  // CardioMEMS and similar — RN-administered, no anesthesia involvement
+  if (NO_ANESTHESIA_PROCEDURES.some(k => proc.includes(k)))
+    return { needs: false, reason: 'No anesthesia procedure — RN-administered sedation' };
+ 
+  // Surgeon-level exclusion — all cases for these providers use RN-administered sedation
+  if (NO_ANESTHESIA_SURGEONS.includes(surgLast))
+    return { needs: false, reason: `${surgLast} — all cases RN-administered sedation` };
  
   const radioKeywords = [
     'ct scan', 'ct liver', 'ct adrenal', 'ct bone', 'ct chest', 'ct abdomen',
@@ -75,8 +104,6 @@ function needsAnesthesia(procedure, surgeon, room) {
   if (proc.includes('watchman'))
     return { needs: true, reason: 'Watchman — always needs anesthesia', cardiac: true };
  
-  // IR room or cryoablation — always needs anesthesia, checked BEFORE EP logic
-  // because 'cryoablation' contains 'ablation' which triggers the EP exclusion path
   if (classifyRoom(room).isIR || proc.includes('cryoablation'))
     return { needs: true, reason: 'IR/cryoablation — always needs anesthesia' };
  
@@ -103,11 +130,21 @@ function needsAnesthesia(procedure, surgeon, room) {
     return { needs: true, reason: `Device case — ${surgLast} preference unknown`, flag: true, cardiac: true };
   }
  
-  // IR/cryoablation check moved above EP logic
- 
   return { needs: true, reason: 'Standard case' };
 }
  
+// ═════════════════════════════════════════════════════════════
+// parseQGenda — FIX #1
+// ═════════════════════════════════════════════════════════════
+// Previously: only weekday names (Monday, Tuesday...) flipped
+// inTargetDay to true. If the pasted data started with a DATE line
+// ("April 20, 2026"), nothing ever parsed because inTargetDay stayed
+// false for the whole file.
+//
+// Now: date lines also flip inTargetDay — if the date matches the
+// selected date (targetDateFormatted), inTargetDay = true. If not,
+// false. Weekday lines still work as a fallback.
+// ═════════════════════════════════════════════════════════════
 export function parseQGenda(raw, forceDateStr) {
   if (!raw?.trim()) return null;
  
@@ -140,10 +177,27 @@ export function parseQGenda(raw, forceDateStr) {
     const rl      = roleRaw.toLowerCase().trim();
  
     const isDayName  = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].includes(rl);
-    const isDateLine = /^[a-z]+ \d+, \d{4}$/i.test(roleRaw.trim());
+    const isDateLine = /^[a-z]+ \d+,\s*\d{4}$/i.test(roleRaw.trim());
  
-    if (isDayName)  { if (forceDateStr) inTargetDay = (rl === targetDayName); continue; }
-    if (isDateLine) continue;
+    // Weekday header — flip inTargetDay based on name match
+    if (isDayName) {
+      if (forceDateStr) inTargetDay = (rl === targetDayName);
+      continue;
+    }
+ 
+    // Date header (e.g. "April 20, 2026") — flip inTargetDay based on date match.
+    // This was the bug: previously `continue` skipped without updating inTargetDay,
+    // so pasted data that started with a date line never entered the target day.
+    if (isDateLine) {
+      if (forceDateStr && targetDateFormatted) {
+        // Normalize both sides for comparison (tolerate extra whitespace / case)
+        const pastedDate = roleRaw.trim().replace(/\s+/g, ' ').toLowerCase();
+        const targetDate = targetDateFormatted.replace(/\s+/g, ' ').toLowerCase();
+        inTargetDay = (pastedDate === targetDate);
+      }
+      continue;
+    }
+ 
     if (!inTargetDay) continue;
     if (!roleRaw || !name || name.length < 2) continue;
  
@@ -166,17 +220,17 @@ export function parseQGenda(raw, forceDateStr) {
  
     if (name && !assigned.has(name)) {
       assigned.add(name);
-      if      (rl.includes('personal time off'))                                   result.PTO.push(name);
-      else if (rl.trim() === 'off')                                                result.OFF.push(name);
-      else if (rl.includes('post or'))                                             result.PostOR.push(name);
-      else if (rl.includes('post ob'))                                             result.PostOB.push(name);
+      if      (rl.includes('personal time off'))                                       result.PTO.push(name);
+      else if (rl.trim() === 'off')                                                    result.OFF.push(name);
+      else if (rl.includes('post or'))                                                 result.PostOR.push(name);
+      else if (rl.includes('post ob'))                                                 result.PostOB.push(name);
       else if (rl.includes('or call') && !rl.includes('post') && !rl.includes('back')) result.ORCall = name;
-      else if (rl.includes('back up call') || rl.includes('backup call'))         backUpCallNames.push(name);
-      else if (rl.includes('ob call'))                                             result.OBCall = name;
-      else if (rl.includes('cardiac call'))                                        result.CardiacCall = name;
-      else if (rl.includes('backup cv'))                                           result.BackupCV = name;
-      else if (rl.includes('7/8 hour shift'))                                      result.SevenEightShift = name;
-      else if (rl.includes('locum'))                                               result.Locums.push(name);
+      else if (rl.includes('back up call') || rl.includes('backup call'))              backUpCallNames.push(name);
+      else if (rl.includes('ob call'))                                                 result.OBCall = name;
+      else if (rl.includes('cardiac call'))                                            result.CardiacCall = name;
+      else if (rl.includes('backup cv'))                                               result.BackupCV = name;
+      else if (rl.includes('7/8 hour shift'))                                          result.SevenEightShift = name;
+      else if (rl.includes('locum'))                                                   result.Locums.push(name);
     }
   }
  
@@ -201,9 +255,7 @@ export function parseQGenda(raw, forceDateStr) {
   if (result.BackUpCall) addMD(result.BackUpCall, 'Back Up Call (#2)', 2);
   addMD(result.CardiacCall,     'Cardiac Call (CV)', 0);
   addMD(result.BackupCV,        'Backup CV',         0);
-  // ── OB Call intentionally excluded from workingMDs ───────────
-  // OB Call provider covers OB only — not available for OR assignments.
-  // result.OBCall is still stored for reference but never added to workingMDs.
+  // OB Call intentionally excluded from workingMDs
   addMD(result.SevenEightShift, '7/8 Hr Shift',     99);
  
   Object.entries(result.Ranks)
@@ -220,7 +272,6 @@ export function parseQGenda(raw, forceDateStr) {
     ...result.OFF.map(n    => ({ name: n, reason: 'OFF' })),
     ...result.PostOR.map(n => ({ name: n, reason: 'Post OR — off-site' })),
     ...result.PostOB.map(n => ({ name: n, reason: 'Post OB — off-site' })),
-    // OB Call shown as unavailable so user knows where they are
     ...(result.OBCall ? [{ name: result.OBCall, reason: 'OB Call — covering OB' }] : []),
   ];
  
@@ -356,7 +407,15 @@ export function classifyCase(procedure, surgeon, room) {
   };
 }
  
-export function parseCubeData(raw, forceDateStr) {
+// ═════════════════════════════════════════════════════════════
+// parseCubeData — FIXES #2, #3, #4, #5
+// ═════════════════════════════════════════════════════════════
+// #2: WL (add-on) entries completely dropped — no phantom room created
+// #3/#4: Excluded cases filtered out of room case lists; rooms with
+//        zero surviving cases are removed entirely
+// #5: Optional resourceStructure param trims Main OR rooms to ceiling
+// ═════════════════════════════════════════════════════════════
+export function parseCubeData(raw, forceDateStr, resourceStructure = null) {
   if (!raw?.trim()) return { rooms: [], excluded: [], flagged: [], targetDate: null, totalParsed: 0 };
  
   const lines      = raw.trim().split('\n');
@@ -406,9 +465,11 @@ export function parseCubeData(raw, forceDateStr) {
  
     const roomType = classifyRoom(roomP);
  
-    // ── Add-On Room: any BMH WL room → consistent display label ──
-    const isAddOnRoom = roomType.isAddOn || /\bWL\b/i.test(roomP);
-    const displayRoom = isAddOnRoom ? 'BMH OR Add-On Room' : roomP;
+    // ── FIX #2: DROP WL (add-on) entries entirely ──
+    // Previously these got relabeled to "BMH OR Add-On Room" and generated
+    // a phantom room card with no cases. OR.endo.CCL already accounts for
+    // add-on capacity — we do not create a separate phantom room for it.
+    if (roomType.isAddOn || /\bWL\b/i.test(roomP)) continue;
  
     const detectedArea = currentArea || (
       roomType.isCathEP ? 'BMH CATH LAB' :
@@ -423,7 +484,7 @@ export function parseCubeData(raw, forceDateStr) {
     allCases.push({
       date:           currentDate,
       caseNumber:     caseP,
-      room:           displayRoom,
+      room:           roomP,
       area:           detectedArea,
       building:       roomType.building,
       encounterType:  encP,
@@ -451,20 +512,22 @@ export function parseCubeData(raw, forceDateStr) {
   }
  
   const todayCases    = allCases.filter(c => c.date === targetDate);
+  // FIX #3/#4: needsCoverage now excludes CardioMEMS/Alalwan at case level
+  // (handled inside needsAnesthesia which returns needs:false for them)
   const needsCoverage = todayCases.filter(c => c.needsAnesthesia);
   const excluded      = todayCases.filter(c => !c.needsAnesthesia);
   const flagged       = todayCases.filter(c => c.anesFlag);
  
   const roomMap = {};
   for (const c of needsCoverage) {
-    // Rooms with no matched location get merged into Add-On Room
-    // rather than appearing as "[area]-unknown"
-    const key = c.room || 'BMH OR Add-On Room';
-    if (!roomMap[key]) roomMap[key] = [];
-    roomMap[key].push(c);
+    // Rooms with no matched location — skip entirely (was previously
+    // bucketed into phantom "BMH OR Add-On Room", now dropped)
+    if (!c.room) continue;
+    if (!roomMap[c.room]) roomMap[c.room] = [];
+    roomMap[c.room].push(c);
   }
  
-  const roomAssignments = Object.entries(roomMap).map(([room, roomCases]) => {
+  let roomAssignments = Object.entries(roomMap).map(([room, roomCases]) => {
     const allIntel = roomCases.map(c => classifyCase(c.procedure, c.surgeon, c.room));
  
     const acuity =
@@ -501,6 +564,44 @@ export function parseCubeData(raw, forceDateStr) {
       manuallyAdded:      false,
     };
   }).sort((a, b) => a.room.localeCompare(b.room));
+ 
+  // ═══════════════════════════════════════════════════════════
+  // FIX #5: Enforce OR.endo.CCL as hard ceiling for Main OR rooms
+  // ═══════════════════════════════════════════════════════════
+  // If we committed to 7 Main ORs but the cube shows 8, trim the
+  // lowest-priority room. Priority preserved: cardiac, thoracic,
+  // blocks, and peds rooms always kept — routine rooms dropped first.
+  //
+  // Rooms dropped here are almost always ones where the scheduling
+  // dept added cases without confirming coverage. Not our problem
+  // to solve (per Dr. Pipito) — we staff to our commitment.
+  // ═══════════════════════════════════════════════════════════
+  if (resourceStructure) {
+    const committedMainOR = Math.ceil(parseFloat(resourceStructure.mainOR) || 0);
+    const mainRooms       = roomAssignments.filter(r =>
+      !r.isEndo && !r.isCathEP && !r.isBOOS && !r.isIR
+    );
+ 
+    if (committedMainOR > 0 && mainRooms.length > committedMainOR) {
+      // Score each main room — higher = higher priority to keep
+      const scoreRoom = r => {
+        let score = 0;
+        if (r.isCardiac || r.acuity === 'cardiac') score += 100;
+        if (r.isThoracic)                          score += 80;
+        if (r.blockRequired)                       score += 60;
+        if (r.acuity === 'peds')                   score += 50;
+        if (r.acuity === 'high')                   score += 40;
+        if (r.acuity === 'medium-high')            score += 20;
+        score += r.caseCount;
+        return score;
+      };
+      const sortedMain  = [...mainRooms].sort((a, b) => scoreRoom(b) - scoreRoom(a));
+      const keepMain    = new Set(sortedMain.slice(0, committedMainOR).map(r => r.room));
+      roomAssignments   = roomAssignments.filter(r =>
+        r.isEndo || r.isCathEP || r.isBOOS || r.isIR || keepMain.has(r.room)
+      );
+    }
+  }
  
   return { rooms: roomAssignments, excluded, flagged, targetDate, totalParsed: todayCases.length };
 }
@@ -563,22 +664,15 @@ export function buildAssignments(rooms, qg, orCallChoice) {
   let result = rooms.map(r => ({ ...r }));
   const used = new Set();
  
-  // OB Call is excluded from workingMDs at parse time, so no filter needed here.
-  // Cardiac decision tree runs first.
   result = cardiacDecisionTree(result, qg.CardiacCall || qg.ORCall, qg.BackupCV);
   result.forEach(r => { if (r.assignedProvider) used.add(r.assignedProvider); });
  
-  // Apply OR Call choice and lock them out of all further passes only if assignment succeeds.
-  // orCallConsumed is ONLY set true when the room is actually found and assigned.
-  // If the room isn't found for any reason, OR Call stays in the fill order so they
-  // still get assigned somewhere — we never silently drop them.
   let orCallConsumed = false;
   if (orCallChoice && qg.ORCall) {
     if (orCallChoice.type === 'available') {
       used.add(qg.ORCall);
       orCallConsumed = true;
     } else if (orCallChoice.type === 'room' && orCallChoice.room) {
-      // Try exact match first, then fuzzy (normalise spaces/leading zeros)
       const normalise = s => (s || '').toLowerCase().replace(/\s+/g, ' ').replace(/\b0+(\d)/g, '$1').trim();
       const target = normalise(orCallChoice.room);
       let idx = result.findIndex(r => r.room === orCallChoice.room);
@@ -588,29 +682,9 @@ export function buildAssignments(rooms, qg, orCallChoice) {
         used.add(qg.ORCall);
         orCallConsumed = true;
       }
-      // If room still not found, orCallConsumed stays false —
-      // OR Call remains in the fill order and will be assigned normally.
     }
   }
  
-  // Build fill order — exclude OR Call if their choice was applied (consumed),
-  // and always exclude OB Call (not in workingMDs anyway, but belt-and-suspenders).
-  const order = [
-    ...qg.workingMDs.filter(p => p.role === 'Cardiac Call (CV)'),
-    ...qg.workingMDs.filter(p => p.role === 'Backup CV'),
-    // OR Call only included in fill order if they haven't been consumed by their choice
-    ...(!orCallConsumed ? qg.workingMDs.filter(p => p.role === 'OR Call (#1)') : []),
-    ...qg.workingMDs.filter(p => p.role === 'Locum'),
-    ...qg.workingMDs.filter(p => p.role === 'Back Up Call (#2)'),
-    ...qg.workingMDs.filter(p => p.rankNum >= 3 && p.rankNum < 50).sort((a, b) => a.rankNum - b.rankNum),
-    ...qg.workingMDs.filter(p => p.role === '7/8 Hr Shift'),
-  ];
- 
-  // ── PRIORITY ASSIGNMENTS ONLY ────────────────────────────────
-  // buildAssignments locks in specialty/priority rooms.
-  // General fill and care team formation happen in buildCareTeams.
- 
-  // All working MDs available for priority assignment
   const allMDs = [
     ...qg.workingMDs.filter(p => p.role === 'Cardiac Call (CV)'),
     ...qg.workingMDs.filter(p => p.role === 'Backup CV'),
@@ -621,10 +695,8 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     ...qg.workingMDs.filter(p => p.role === '7/8 Hr Shift'),
   ];
  
-  // Block rooms — locum block-capable MDs first, then backup call/ranked
-  // Order respects: Nielson/Lambert/Powell (locums) → Dodwani/Pond (locums) → Pipito (backup call)
+  // Block rooms
   const blockOrder = ['Nielson, Mark', 'Lambert', 'Powell, Jason', 'Dodwani', 'Pond, William', 'Pipito, Nicholas A'];
- 
   for (const room of result) {
     if (room.assignedProvider || !room.blockRequired) continue;
     for (const name of blockOrder) {
@@ -640,8 +712,7 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     if (brand) { room.assignedProvider = brand.name; used.add(brand.name); }
   }
  
-  // Peds — DeWitt first (employed, peds-capable), then locums capable of peds, then Pipito
-  // Pipito is backup call (#2) so locums should be exhausted before pulling him for peds
+  // Peds
   const pedsOrder = ['DeWitt, Bracken J', 'Gathings, Vincent', 'Nielson, Mark', 'Pipito, Nicholas A'];
   for (const room of result) {
     if (room.assignedProvider || room.acuity !== 'peds') continue;
@@ -651,6 +722,6 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     }
   }
  
-  // Remaining rooms left unassigned — buildCareTeams handles them
   return result;
 }
+ 
