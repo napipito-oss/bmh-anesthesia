@@ -165,57 +165,44 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   anesthetistPool = sortAnesthetistsByVariety(anesthetistPool, 'endo', anesthetistHistory);
  
   // ── Care Team A: Brand → Endo ─────────────────────────────────
+  // OR.endo.CCL is the source of truth for how many endo rooms we cover.
+  // The cube only tells us which rooms have cases — it never determines room count.
+  // committedEndo = number from OR.endo.CCL. We staff exactly that many rooms.
+  // No phantom rooms generated — the OR.endo.CCL number already accounts for
+  // add-on capacity. If cube shows fewer rooms, those got consolidated; not our concern.
   if (brandMD && !usedMDs.has(brandMD.name) && endoRooms.length > 0) {
-    const committedEndo = Math.min(Math.ceil(parseFloat(resourceStructure.endo) || 0), 3);
-    const cappedRatio   = Math.min(Math.max(endoRooms.length, committedEndo), 3);
-    const endoAnests    = anesthetistPool.splice(0, cappedRatio);
-    const visibleRooms  = endoRooms.slice(0, cappedRatio);
-    const phantomCount  = cappedRatio - visibleRooms.length;
+    const committedEndo  = Math.min(Math.ceil(parseFloat(resourceStructure.endo) || 0), 3);
+    // Staff the visible cube rooms, up to committedEndo. Never generate extra rooms.
+    const endoRoomCount  = Math.min(endoRooms.length, Math.max(endoRooms.length, committedEndo));
+    const roomsToAssign  = endoRooms.slice(0, endoRoomCount);
+    const endoAnests     = anesthetistPool.splice(0, endoRoomCount);
  
-    const phantomRooms = Array.from({ length: phantomCount }, (_, i) => ({
-      room: 'Endo Add-Ons',
-      area: 'BMH ENDO', building: 'ENDO_FLOOR',
-      isEndo: true, isCareTeam: true, isPhantom: true,
-      acuity: 'routine', cases: [], caseCount: 0, surgeons: [],
-      flags: [{ level: 'info', msg: 'Reserved for inpatient add-on — no cases booked yet' }],
+    const endoAssignment = roomsToAssign.map((room, i) => ({
+      ...room,
       assignedProvider: brandMD.name,
-      anesthetist: endoAnests[visibleRooms.length + i]?.name || null,
-      careTeamId: 0, careTeamLabel: `Care Team 1 — Brand 1:${cappedRatio}`,
-      careTeamRatio: `1:${cappedRatio}`, caseStatus: 'Not Started',
-      cardiacNote: '', blockRequired: false, blockPossible: false,
-      preferredProviders: [], avoidProviders: [], manuallyAdded: false,
+      anesthetist:   endoAnests[i]?.name || null,
+      careTeamId:    0,
+      careTeamLabel: `Care Team 1 — Brand 1:${endoRoomCount}`,
+      careTeamRatio: `1:${endoRoomCount}`,
+      isCareTeam:    true,
     }));
  
-    const endoAssignment = [
-      ...visibleRooms.map((room, i) => ({
-        ...room,
-        assignedProvider: brandMD.name,
-        anesthetist:   endoAnests[i]?.name || null,
-        careTeamId:    0,
-        careTeamLabel: `Care Team 1 — Brand 1:${cappedRatio}`,
-        careTeamRatio: `1:${cappedRatio}`,
-        isCareTeam:    true,
-      })),
-      ...phantomRooms,
-    ];
- 
     careTeams.push({
-      id: 0, md: brandMD.name, ratio: `1:${cappedRatio}`,
+      id: 0, md: brandMD.name, ratio: `1:${endoRoomCount}`,
       rooms: endoAssignment.map(r => r.room),
       anesthetists: endoAnests.map(a => a.name),
       color: CARE_TEAM_COLORS[0],
-      hasReserve: phantomCount > 0,
+      hasReserve: false,
     });
  
     usedMDs.add(brandMD.name);
     endoAnests.forEach(a => usedAnesthetists.add(a.name));
     if (remainingRatios.length > 0) remainingRatios.shift();
  
-    visibleRooms.forEach((room, i) => {
+    roomsToAssign.forEach((room, i) => {
       const idx = rooms.findIndex(r => r.room === room.room);
       if (idx >= 0) rooms[idx] = endoAssignment[i];
     });
-    phantomRooms.forEach(pr => rooms.push(pr));
   }
  
   // ── Care Teams B+: Main OR ────────────────────────────────────
@@ -422,3 +409,4 @@ function sortAnesthetistsByVariety(anesthetists, area, history) {
     return aCount - bCount;
   });
 }
+ 
