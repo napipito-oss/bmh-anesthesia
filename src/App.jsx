@@ -351,7 +351,11 @@ export default function App() {
   finishRef.current = finishBuildingSchedule;
 
   const loadSchedule = useCallback(() => {
-    const parsed = parseCubeData(cubeRaw, selectedDate);
+    // Pass resourceStructure so parseCubeData can enforce the Main OR ceiling.
+    // If resource was bypassed (resourceBypassed=true, resourceStructure empty),
+    // parseCubeData receives null and skips the ceiling trim.
+    const rs = resourceLoaded ? resourceStructure : null;
+    const parsed = parseCubeData(cubeRaw, selectedDate, rs);
     setDateMismatch(selectedDate && parsed.totalParsed === 0);
     setPendingRooms(parsed.rooms);
     setSchedLoaded(true);
@@ -360,7 +364,7 @@ export default function App() {
     } else {
       finishRef.current(parsed.rooms, null);
     }
-  }, [cubeRaw, qg, selectedDate]);
+  }, [cubeRaw, qg, selectedDate, resourceLoaded, resourceStructure]);
 
   const handleORCallConfirm = useCallback((choice) => {
     setShowORCallPrompt(false);
