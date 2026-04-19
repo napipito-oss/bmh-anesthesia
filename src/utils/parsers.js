@@ -12,13 +12,16 @@
 //   - OR.endo.CCL Main OR number enforced as hard ceiling
 // v5.1:
 //   - parseCubeData accepts committedCath; generates Cath Lab Add-On
-//     phantom rooms when committedCath > visible cath rooms
+//     phantoms when committedCath > visible cath rooms
 //   - cardiacDecisionTree restructured as two-pass assignment:
-//     Layer 1 — Tier 1 & 2 cases (open heart, TAVR, thoracic) first
+//     Layer 1 — Tier 1/2 (open heart, TAVR, thoracic) first
 //     Layer 2 — remaining CV MDs to cath rooms with minors-preference
-//     (CV Call → minors/phantom, Backup CV → EP) for easier extraction
-//     if open-heart emergency arises
-//     Cath rooms with no CV MD left flow to standard general fill.
+// v5.2:
+//   - buildAssignments no longer falls back to qg.ORCall when
+//     qg.CardiacCall is missing. Passing OR Call as the CV surrogate
+//     pulled the OR Call person into cath work, which broke both the
+//     OR Call choice flow and the strict "OR Call doesn't take a room
+//     unless they choose one" rule.
 // ─────────────────────────────────────────────────────────────
 import { SURGEON_BLOCKS } from '../data/surgeons.js';
  
@@ -771,8 +774,11 @@ export function buildAssignments(rooms, qg, orCallChoice) {
   const used = new Set();
  
   // OB Call is excluded from workingMDs at parse time, so no filter needed here.
-  // Cardiac decision tree runs first.
-  result = cardiacDecisionTree(result, qg.CardiacCall || qg.ORCall, qg.BackupCV);
+  // Cardiac decision tree runs first. If no CardiacCall is scheduled, we pass
+  // undefined — the tree will skip CV assignments and those rooms will flow to
+  // general fill later. DO NOT fall back to OR Call here; that would pull the
+  // OR Call person into cath work and undermine the OR Call choice flow.
+  result = cardiacDecisionTree(result, qg.CardiacCall, qg.BackupCV);
   result.forEach(r => { if (r.assignedProvider) used.add(r.assignedProvider); });
  
   // Apply OR Call choice and lock them out of all further passes only if assignment succeeds.
@@ -861,4 +867,3 @@ export function buildAssignments(rooms, qg, orCallChoice) {
   // Remaining rooms left unassigned — buildCareTeams handles them
   return result;
 }
- 
