@@ -13,11 +13,18 @@
 //   - Endo phantom add-on room restored: if committedEndo > cube rooms,
 //     generate phantom Endo Add-On Room(s) to reach committed count.
 // v3.5:
-//   - Cath Lab Add-On fallback pass added. Cath rooms (real or phantom)
-//     that didn't get a CV MD from cardiacDecisionTree now fill from
-//     standard priority: Locums → Backup Call → Rank 3+. Without this,
-//     unassigned cath phantoms disappeared into a hole (excluded from
-//     preAssigned, mainRooms, and soloRooms all at once).
+//   - Cath Lab Add-On fallback pass added.
+// v3.6 (critical fixes):
+//   - globalUsed now includes ALL already-assigned providers, not just
+//     cardiac/cath. This prevents an MD assigned to a block/endo/peds
+//     room in buildAssignments from being reassigned by the care team
+//     loop here. Symptom: Nielson assigned to both a block room AND a
+//     care team, causing downstream MDs like Pond to get skipped.
+//   - unassignedRooms now filters by !assignedProvider, so rooms already
+//     assigned in buildAssignments stay put — no more overwrites.
+//   - Endo MD fallback: if Brand is off/PTO, the next available MD in
+//     priority order covers endo. Without this, endo rooms and phantom
+//     Endo Add-On rooms were skipped entirely when Brand wasn't working.
 // ─────────────────────────────────────────────────────────────
 import { classifyRoom } from './parsers.js';
  
@@ -120,15 +127,19 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   // ── Pre-assigned rooms ──────────────────────────────────────
   const preAssigned = rooms.filter(r => r.assignedProvider && (r.isCardiac || r.isCathEP));
  
-  // unassignedRooms excludes cardiac/cath AND OR Call choice rooms
+  // unassignedRooms: rooms WITHOUT an assignedProvider, excluding OR Call choice rooms.
+  // Any room already assigned by buildAssignments (block, endo, peds, cardiac) stays
+  // put — we never re-process it here.
   const unassignedRooms = rooms.filter(r =>
-    !preAssigned.find(p => p.room === r.room) && !r.isORCallChoice
+    !r.assignedProvider && !r.isORCallChoice
   );
  
-  // ctUsed: cardiac/cath + OR Call choice providers locked out of care team MD pool
+  // globalUsed: EVERY provider already assigned by the time buildCareTeams runs.
+  // This includes cardiac/cath (cardiacDecisionTree), block rooms, endo, peds, OR Call
+  // choice — anything buildAssignments did. Without this, an MD assigned to a block
+  // room would also be picked for a care team, duplicating them across rooms.
   const globalUsed = new Set();
-  preAssigned.forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
-  rooms.filter(r => r.isORCallChoice).forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
+  rooms.forEach(r => { if (r.assignedProvider) globalUsed.add(r.assignedProvider); });
  
   // soloUsed: ALL already-assigned providers — prevents solo pass double-assignment
   const soloUsed = new Set();
@@ -182,8 +193,15 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   //   - If cube shows EQUAL or MORE rooms than committed, we staff exactly
   //     the committed count (no excess).
   //   - If committed is 0, we staff no endo rooms even if cube shows cases.
+  // Endo MD selection: Brand is preferred, but if he's off/PTO we use the next
+  // available MD in priority order (same availableMDs ordering used elsewhere).
+  // Without this fallback, the whole endo block (including phantom add-on
+  // generation) would be skipped when Brand isn't working.
   const committedEndo = Math.min(Math.ceil(parseFloat(resourceStructure.endo) || 0), 3);
-  if (brandMD && !usedMDs.has(brandMD.name) && committedEndo > 0) {
+  const endoMD = (brandMD && !usedMDs.has(brandMD.name))
+    ? brandMD
+    : availableMDs.find(p => !usedMDs.has(p.name));
+  if (endoMD && committedEndo > 0) {
     // How many visible (cube) endo rooms we'll use: capped at committed
     const visibleCount  = Math.min(endoRooms.length, committedEndo);
     const visibleToUse  = endoRooms.slice(0, visibleCount);
@@ -193,12 +211,13 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     const endoAnests    = anesthetistPool.splice(0, totalRooms);
  
     // Real (cube) endo rooms — update in place
+    const endoMDLastName = endoMD.name.split(',')[0];
     const visibleAssignment = visibleToUse.map((room, i) => ({
       ...room,
-      assignedProvider: brandMD.name,
+      assignedProvider: endoMD.name,
       anesthetist:   endoAnests[i]?.name || null,
       careTeamId:    0,
-      careTeamLabel: `Care Team 1 — Brand 1:${totalRooms}`,
+      careTeamLabel: `Care Team 1 — ${endoMDLastName} 1:${totalRooms}`,
       careTeamRatio: `1:${totalRooms}`,
       isCareTeam:    true,
     }));
@@ -216,10 +235,10 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
       caseCount:       0,
       surgeons:        [],
       flags:           [{ level: 'info', msg: 'Endo Add-On Room — reserved per OR.endo.CCL, no cases booked yet' }],
-      assignedProvider: brandMD.name,
+      assignedProvider: endoMD.name,
       anesthetist:      endoAnests[visibleCount + i]?.name || null,
       careTeamId:       0,
-      careTeamLabel:    `Care Team 1 — Brand 1:${totalRooms}`,
+      careTeamLabel:    `Care Team 1 — ${endoMDLastName} 1:${totalRooms}`,
       careTeamRatio:    `1:${totalRooms}`,
       caseStatus:       'Not Started',
       cardiacNote:      '',
@@ -231,14 +250,14 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     }));
  
     careTeams.push({
-      id: 0, md: brandMD.name, ratio: `1:${totalRooms}`,
+      id: 0, md: endoMD.name, ratio: `1:${totalRooms}`,
       rooms: [...visibleAssignment.map(r => r.room), ...phantomRooms.map(r => r.room)],
       anesthetists: endoAnests.map(a => a.name),
       color: CARE_TEAM_COLORS[0],
       hasReserve: phantomCount > 0,
     });
  
-    usedMDs.add(brandMD.name);
+    usedMDs.add(endoMD.name);
     endoAnests.forEach(a => usedAnesthetists.add(a.name));
     if (remainingRatios.length > 0) remainingRatios.shift();
  
