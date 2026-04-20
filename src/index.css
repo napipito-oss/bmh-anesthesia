@@ -1,28 +1,37 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg-base: #07090f;
-  --bg-surface: #0c1018;
-  --bg-elevated: #111827;
-  --bg-hover: #1a2235;
-  --border: #1e3a5f;
-  --border-bright: #2d5a8e;
-  --text-primary: #e8edf5;
-  --text-secondary: #94a3b8;
-  --text-muted: #475569;
-  --text-faint: #2d3f55;
-  --accent-blue: #3b82f6;
+  /* Backgrounds — medium-dark navy instead of near-black */
+  --bg-base:     #0f172a;
+  --bg-surface:  #1a2436;
+  --bg-elevated: #1e2e44;
+  --bg-hover:    #253450;
+
+  /* Borders — clearly visible on dark bg */
+  --border:        #2d4d70;
+  --border-bright: #4a74a8;
+
+  /* Text — high contrast for bright OR environment */
+  --text-primary:   #f0f6ff;
+  --text-secondary: #a8c0d6;
+  --text-muted:     #6e90aa;
+  --text-faint:     #4a6880;
+
+  /* Accents — unchanged */
+  --accent-blue:     #3b82f6;
   --accent-blue-dim: #1d4ed8;
-  --accent-teal: #14b8a6;
-  --accent-purple: #8b5cf6;
-  --accent-pink: #ec4899;
-  --accent-green: #22c55e;
-  --accent-amber: #f59e0b;
-  --accent-orange: #f97316;
-  --accent-red: #ef4444;
+  --accent-teal:     #14b8a6;
+  --accent-purple:   #8b5cf6;
+  --accent-pink:     #ec4899;
+  --accent-green:    #22c55e;
+  --accent-amber:    #f59e0b;
+  --accent-orange:   #f97316;
+  --accent-red:      #ef4444;
+
   --font-mono: 'IBM Plex Mono', monospace;
-  --font-sans: 'IBM Plex Sans', sans-serif;
-  --radius: 6px;
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+
+  --radius:    6px;
   --radius-sm: 4px;
   --transition: 0.15s ease;
 }
@@ -31,20 +40,21 @@ html, body, #root {
   height: 100%;
   background: var(--bg-base);
   color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 13px;
+  font-family: var(--font-sans);   /* proportional font — much more readable */
+  font-size: 14px;                 /* up from 13px */
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
-::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: var(--bg-base); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
 
-button { cursor: pointer; font-family: var(--font-mono); }
-select { font-family: var(--font-mono); }
-textarea { font-family: var(--font-mono); }
-input { font-family: var(--font-mono); }
+/* Buttons and form controls use sans except textareas (data entry stays mono) */
+button   { cursor: pointer; font-family: var(--font-sans); }
+select   { font-family: var(--font-sans); }
+textarea { font-family: var(--font-mono); }  /* keep mono for tab-delimited data */
+input    { font-family: var(--font-sans); }
 
 ::selection { background: rgba(59,130,246,0.3); }

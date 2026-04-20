@@ -92,12 +92,12 @@ export function roomCareTeamSuitability(room) {
 }
  
 export const CARE_TEAM_COLORS = [
-  { bg: '#0f2a1e', border: '#22c55e', text: '#4ade80', label: 'Care Team 1' },
-  { bg: '#1e1a0f', border: '#f59e0b', text: '#fbbf24', label: 'Care Team 2' },
-  { bg: '#0f1a2e', border: '#3b82f6', text: '#60a5fa', label: 'Care Team 3' },
-  { bg: '#2a0f2a', border: '#a855f7', text: '#c084fc', label: 'Care Team 4' },
-  { bg: '#2a1a0f', border: '#f97316', text: '#fb923c', label: 'Care Team 5' },
-  { bg: '#0f2a2a', border: '#14b8a6', text: '#2dd4bf', label: 'Care Team 6' },
+  { bg: '#0d2e1a', border: '#22c55e', text: '#86efac', label: 'Care Team 1' },
+  { bg: '#2e1e08', border: '#f59e0b', text: '#fcd34d', label: 'Care Team 2' },
+  { bg: '#0a1e40', border: '#3b82f6', text: '#93c5fd', label: 'Care Team 3' },
+  { bg: '#1e0a30', border: '#a855f7', text: '#d8b4fe', label: 'Care Team 4' },
+  { bg: '#2e1408', border: '#f97316', text: '#fdba74', label: 'Care Team 5' },
+  { bg: '#082828', border: '#14b8a6', text: '#5eead4', label: 'Care Team 6' },
 ];
  
 const PERIPHERAL_BLOCK_KEYWORDS = [
