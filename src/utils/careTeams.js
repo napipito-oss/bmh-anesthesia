@@ -267,22 +267,21 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   }
  
   // ── Care Teams B+: Main OR ────────────────────────────────────
-  // Only care-team-comfortable MDs enter this pool (in strict priority order:
-  // Locums first, then Backup Call, then Rank 3+). CARE_TEAM_AVOID (Eskew,
-  // Shepherd) and CARE_TEAM_RELUCTANT (DeWitt) skip this and go to solo fill.
+  // Care team pool: comfortable + reluctant MDs in priority order.
+  // CARE_TEAM_AVOID (Eskew, Shepherd) are the only ones excluded — they go to
+  // solo fill. CARE_TEAM_RELUCTANT (DeWitt) is included but capped at 1:2.
+  // Excluding DeWitt left rooms going to solo fill (no AA) while AAs floated —
+  // the opposite of what we want.
   const ctMDs = availableMDs.filter(p =>
     !usedMDs.has(p.name) &&
-    !CARE_TEAM_AVOID.includes(p.name) &&
-    !CARE_TEAM_RELUCTANT.includes(p.name)
+    !CARE_TEAM_AVOID.includes(p.name)
   );
 
   let ctIdx    = 1;
   let roomPool = [...scoredMain.filter(r => roomCareTeamSuitability(r) !== 'avoid')];
 
-  // Greedy loop: keep forming care teams until AAs (<2 left), comfortable MDs,
-  // or rooms run out. Target 1:3; drop to 1:2 when only 2 AAs remain. Never 1:1.
-  // This is intentionally NOT limited by a ratio table — we just keep going until
-  // we physically can't form another team. Remaining AAs become floats.
+  // Greedy loop: keep forming care teams until AAs (<2 left), eligible MDs,
+  // or rooms run out. Target 1:3 for comfortable MDs, 1:2 for reluctant. Never 1:1.
   while (ctMDs.length > 0 && roomPool.length >= 2) {
     const remainingAAs = anesthetistPool.filter(a => !usedAnesthetists.has(a.name)).length;
     if (remainingAAs < 2) break;
@@ -290,7 +289,9 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     const md = ctMDs.shift();
     if (!md || usedMDs.has(md.name)) continue;
 
-    const targetRatio = remainingAAs >= 3 ? 3 : 2;
+    const isReluctant = CARE_TEAM_RELUCTANT.includes(md.name);
+    const maxRatio    = isReluctant ? 2 : 3;
+    const targetRatio = Math.min(maxRatio, remainingAAs);
     const actualRatio = Math.min(targetRatio, roomPool.length);
     if (actualRatio < 2) break;
 
