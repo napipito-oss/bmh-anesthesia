@@ -161,8 +161,8 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
  
   const workingMDs   = qg.workingMDs || [];
  
-  // availableMDs: priority order — OR Call (if care team choice) → Locums → Backup Call → Rank 3+
-  // OR Call who chose "Care Team" is injected at rank-1 position (after cardiac, before locums).
+  // OR Call who chose "Care Team" slots in AFTER locums — locums always get 1:3 first.
+  // OR Call is on call all night, so they get a lighter 1:2 load (enforced below).
   const orCallForCT = (orCallChoice?.type === 'careteam' && qg.ORCall)
     ? workingMDs.filter(p => p.name === qg.ORCall && !globalUsed.has(p.name))
     : [];
@@ -170,8 +170,8 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   const availableMDs = [
     ...workingMDs.filter(p => p.role === 'Cardiac Call (CV)'),
     ...workingMDs.filter(p => p.role === 'Backup CV'),
-    ...orCallForCT,
     ...workingMDs.filter(p => p.role === 'Locum'),
+    ...orCallForCT,                                                                  // after locums
     ...workingMDs.filter(p => p.role === 'Back Up Call (#2)'),
     ...workingMDs.filter(p => p.rankNum >= 3 && p.rankNum < 50).sort((a, b) => a.rankNum - b.rankNum),
     ...workingMDs.filter(p => p.role === '7/8 Hr Shift'),
@@ -286,8 +286,19 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   let ctIdx    = 1;
   let roomPool = [...scoredMain.filter(r => roomCareTeamSuitability(r) !== 'avoid')];
 
+  // When block rooms are in the pool, sort block-capable MDs (Nielson, Lambert, etc.)
+  // to the front of ctMDs so they claim the block/jump cases before others.
+  // This is a stable sort within the existing priority ordering.
+  if (roomPool.some(r => r.blockRequired)) {
+    ctMDs.sort((a, b) => {
+      const aB = REGIONAL_CAPABLE.includes(a.name) ? 0 : 1;
+      const bB = REGIONAL_CAPABLE.includes(b.name) ? 0 : 1;
+      return aB - bB;
+    });
+  }
+
   // Greedy loop: keep forming care teams until AAs (<2 left), eligible MDs,
-  // or rooms run out. Target 1:3 for comfortable MDs, 1:2 for reluctant. Never 1:1.
+  // or rooms run out. Target 1:3 for comfortable MDs, 1:2 for reluctant/OR Call. Never 1:1.
   while (ctMDs.length > 0 && roomPool.length >= 2) {
     const remainingAAs = anesthetistPool.filter(a => !usedAnesthetists.has(a.name)).length;
     if (remainingAAs < 2) break;
@@ -296,18 +307,19 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     if (!md || usedMDs.has(md.name)) continue;
 
     const isReluctant = CARE_TEAM_RELUCTANT.includes(md.name);
-    const maxRatio    = isReluctant ? 2 : 3;
+    const isORCallCT  = orCallChoice?.type === 'careteam' && md.name === qg?.ORCall;
+    const maxRatio    = (isReluctant || isORCallCT) ? 2 : 3;  // OR Call on call all night → cap 1:2
     const targetRatio = Math.min(maxRatio, remainingAAs);
     const actualRatio = Math.min(targetRatio, roomPool.length);
     if (actualRatio < 2) break;
 
     // Jump rooms (same surgeon, 2 rooms with staggered times) should always land
     // in the same care team — the natural time stagger lets one MD cover both.
-    // Seed the pool with the jump pair first, then fill remaining slots normally.
-    const jumpPair = findJumpPairInPool(roomPool);
+    // Block-capable MDs prefer jump pairs that contain block-required rooms.
+    const isBlockCapable = REGIONAL_CAPABLE.includes(md.name);
+    const jumpPair = findJumpPairInPool(roomPool, isBlockCapable);
 
     // Block-capable MDs get block rooms sorted to front so blocks land with the right MD.
-    const isBlockCapable = REGIONAL_CAPABLE.includes(md.name);
     let orderedPool;
     if (jumpPair) {
       const rest = roomPool.filter(r => !jumpPair.includes(r));
@@ -495,9 +507,10 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   return { rooms, careTeams, floats: floatAnests, available: availableMDsList, config, anesthetistCount };
 }
  
-// Returns the first pair of rooms in the pool that share a surgeon (jump/flip rooms).
-// Jump rooms have staggered start times by design, so they belong in the same care team.
-function findJumpPairInPool(pool) {
+// Returns a pair of rooms in the pool that share a surgeon (jump/flip rooms).
+// When preferBlock=true (block-capable MD forming next), returns a pair that
+// includes a block-required room first — so Nielson gets the ortho jump rooms.
+function findJumpPairInPool(pool, preferBlock = false) {
   const surgeonMap = {};
   for (const room of pool) {
     for (const surgeon of (room.surgeons || [])) {
@@ -506,10 +519,14 @@ function findJumpPairInPool(pool) {
       surgeonMap[surgeon].push(room);
     }
   }
+  let fallback = null;
   for (const roomsForSurgeon of Object.values(surgeonMap)) {
-    if (roomsForSurgeon.length >= 2) return roomsForSurgeon.slice(0, 2);
+    if (roomsForSurgeon.length < 2) continue;
+    const pair = roomsForSurgeon.slice(0, 2);
+    if (preferBlock && pair.some(r => r.blockRequired)) return pair; // block jump pair — take it
+    if (!fallback) fallback = pair;
   }
-  return null;
+  return fallback;
 }
 
 function pickStaggeredRooms(roomPool, count) {
