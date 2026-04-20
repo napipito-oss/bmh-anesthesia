@@ -161,8 +161,9 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
  
   const workingMDs   = qg.workingMDs || [];
  
-  // OR Call who chose "Care Team" slots in AFTER locums — locums always get 1:3 first.
-  // OR Call is on call all night, so they get a lighter 1:2 load (enforced below).
+  // OR Call who chose "Care Team" is inserted at rank-1 position (before locums) so
+  // their choice is honored. They are capped at 1:2 in the loop below (on call all
+  // night → lighter load), which naturally leaves the 1:3 slots for locums.
   const orCallForCT = (orCallChoice?.type === 'careteam' && qg.ORCall)
     ? workingMDs.filter(p => p.name === qg.ORCall && !globalUsed.has(p.name))
     : [];
@@ -170,8 +171,8 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   const availableMDs = [
     ...workingMDs.filter(p => p.role === 'Cardiac Call (CV)'),
     ...workingMDs.filter(p => p.role === 'Backup CV'),
+    ...orCallForCT,                                                                  // before locums — choice honored first
     ...workingMDs.filter(p => p.role === 'Locum'),
-    ...orCallForCT,                                                                  // after locums
     ...workingMDs.filter(p => p.role === 'Back Up Call (#2)'),
     ...workingMDs.filter(p => p.rankNum >= 3 && p.rankNum < 50).sort((a, b) => a.rankNum - b.rankNum),
     ...workingMDs.filter(p => p.role === '7/8 Hr Shift'),
