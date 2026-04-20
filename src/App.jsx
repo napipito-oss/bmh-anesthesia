@@ -775,8 +775,9 @@ export default function App() {
                     );
                   })()}
                   {(() => {
-                    const assignedAnests = new Set(rooms.filter(r=>r.anesthetist).map(r=>r.anesthetist));
-                    const unusedAnests = (qg?.Anesthetists || []).filter(a => !a.isAdmin && !a.isOff && !assignedAnests.has(a.name));
+                    const assignedAnests  = new Set(rooms.filter(r=>r.anesthetist).map(r=>r.anesthetist));
+                    const floatAnestNames = new Set((careTeamResult?.floats || []).map(f => f.name));
+                    const unusedAnests = (qg?.Anesthetists || []).filter(a => !a.isAdmin && !a.isOff && !assignedAnests.has(a.name) && !floatAnestNames.has(a.name));
                     if (unusedAnests.length === 0) return null;
                     return (
                       <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'8px 12px',minWidth:'160px'}}>

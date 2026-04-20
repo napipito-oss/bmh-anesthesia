@@ -121,8 +121,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
  
   const activeAnesthetists = (qg.Anesthetists || []).filter(a => !a.isAdmin && !a.isOff);
   const anesthetistCount   = activeAnesthetists.length;
-  const config             = getCareTeamConfig(anesthetistCount);
-  const { careTeamRooms: maxCTRooms, ratios, floats: floatCount } = config;
+  const config = getCareTeamConfig(anesthetistCount);
  
   // ── Pre-assigned rooms ──────────────────────────────────────
   const preAssigned = rooms.filter(r => r.assignedProvider && (r.isCardiac || r.isCathEP));
@@ -159,9 +158,6 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     ctScore:  roomCareTeamSuitability(r) === 'good' ? 2 :
               roomCareTeamSuitability(r) === 'ok'   ? 1 : 0,
   })).sort((a, b) => b.ctScore - a.ctScore);
- 
-  let remainingRatios     = [...ratios];
-  let remainingFloatCount = floatCount;
  
   const workingMDs   = qg.workingMDs || [];
  
@@ -260,15 +256,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
  
     usedMDs.add(endoMD.name);
     endoAnests.forEach(a => usedAnesthetists.add(a.name));
-    // Recompute ratios based on AAs actually left after endo.
-    // Endo may commit fewer rooms than its "slot" in the ratio table,
-    // so a simple shift() leaves AAs stranded. Recalculating ensures
-    // the main OR teams absorb exactly what's left.
-    const postEndoAnestCount = Math.max(0, anesthetistCount - totalRooms);
-    const postEndoConfig     = getCareTeamConfig(postEndoAnestCount);
-    remainingRatios          = [...postEndoConfig.ratios];
-    remainingFloatCount      = postEndoConfig.floats;
- 
+
     // Update real rooms in place
     visibleToUse.forEach((room, i) => {
       const idx = rooms.findIndex(r => r.room === room.room);
@@ -279,80 +267,57 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   }
  
   // ── Care Teams B+: Main OR ────────────────────────────────────
-  // ctMDs: only MDs who will actually form care teams (1:2 or 1:3).
-  // CARE_TEAM_AVOID (Eskew, Shepherd) and CARE_TEAM_RELUCTANT (DeWitt) are
-  // excluded here — they go to the solo fill pass instead. Including them here
-  // gave them a "1:1 (Solo)" care team label (which we never do) and wasted
-  // a ratio slot from the care team table, leaving AAs stranded as "available."
+  // Only care-team-comfortable MDs enter this pool (in strict priority order:
+  // Locums first, then Backup Call, then Rank 3+). CARE_TEAM_AVOID (Eskew,
+  // Shepherd) and CARE_TEAM_RELUCTANT (DeWitt) skip this and go to solo fill.
   const ctMDs = availableMDs.filter(p =>
     !usedMDs.has(p.name) &&
     !CARE_TEAM_AVOID.includes(p.name) &&
     !CARE_TEAM_RELUCTANT.includes(p.name)
   );
- 
+
   let ctIdx    = 1;
   let roomPool = [...scoredMain.filter(r => roomCareTeamSuitability(r) !== 'avoid')];
- 
-  for (const ratio of remainingRatios) {
-    if (ctMDs.length === 0 || roomPool.length === 0) break;
+
+  // Greedy loop: keep forming care teams until AAs (<2 left), comfortable MDs,
+  // or rooms run out. Target 1:3; drop to 1:2 when only 2 AAs remain. Never 1:1.
+  // This is intentionally NOT limited by a ratio table — we just keep going until
+  // we physically can't form another team. Remaining AAs become floats.
+  while (ctMDs.length > 0 && roomPool.length >= 2) {
+    const remainingAAs = anesthetistPool.filter(a => !usedAnesthetists.has(a.name)).length;
+    if (remainingAAs < 2) break;
+
     const md = ctMDs.shift();
     if (!md || usedMDs.has(md.name)) continue;
- 
-    // Check if THIS MD is care-team-comfortable.
-    // If yes → form a care team (1:2 or 1:3 with anesthetists).
-    // If no → they take ONE room solo (1:1, no anesthetist attached).
-    // Either way, this MD got a room — we never skip them to keep priority order.
-    const mdComfortable = CARE_TEAM_COMFORTABLE.includes(md.name);
-    const desiredRatio  = mdComfortable ? ratio : 1;
-    const actualRatio   = Math.min(desiredRatio, roomPool.length);
-    if (actualRatio === 0) { usedMDs.add(md.name); continue; }
- 
-    // Never form a 1:1 care team — minimum is 1:2.
-    // If only 1 room is left, give this MD the room solo (no AA) so
-    // the remaining AAs float rather than being wasted on a 1:1.
-    if (mdComfortable && actualRatio < 2) {
-      const soloRoom = pickStaggeredRooms(roomPool, 1)[0];
-      if (soloRoom) {
-        roomPool = roomPool.filter(x => x.room !== soloRoom.room);
-        const idx = rooms.findIndex(r => r.room === soloRoom.room);
-        if (idx >= 0) rooms[idx] = { ...rooms[idx], assignedProvider: md.name, anesthetist: null, isCareTeam: false, careTeamLabel: null };
-      }
-      usedMDs.add(md.name);
-      continue;
-    }
+
+    const targetRatio = remainingAAs >= 3 ? 3 : 2;
+    const actualRatio = Math.min(targetRatio, roomPool.length);
+    if (actualRatio < 2) break;
 
     const ctRooms = pickStaggeredRooms(roomPool, actualRatio);
-    if (ctRooms.length === 0) { usedMDs.add(md.name); continue; }
- 
+    if (ctRooms.length < 2) break;
+
     ctRooms.forEach(r => { roomPool = roomPool.filter(x => x.room !== r.room); });
- 
-    // Only attach anesthetists if this MD is care-team-comfortable.
-    // Non-comfortable MDs run solo (no AA attached at this stage).
-    let ctAnests = [];
-    if (mdComfortable) {
-      const sortedAnests = sortAnesthetistsByVariety(
-        anesthetistPool.filter(a => !usedAnesthetists.has(a.name)),
-        'main', anesthetistHistory
-      );
-      ctAnests = sortedAnests.splice(0, actualRatio);
-      ctAnests.forEach(a => usedAnesthetists.add(a.name));
-      anesthetistPool = anesthetistPool.filter(a => !usedAnesthetists.has(a.name));
-    }
- 
+
+    const sortedAnests = sortAnesthetistsByVariety(
+      anesthetistPool.filter(a => !usedAnesthetists.has(a.name)),
+      'main', anesthetistHistory
+    );
+    const ctAnests = sortedAnests.splice(0, actualRatio);
+    ctAnests.forEach(a => usedAnesthetists.add(a.name));
+    anesthetistPool = anesthetistPool.filter(a => !usedAnesthetists.has(a.name));
+
     const color     = CARE_TEAM_COLORS[ctIdx % CARE_TEAM_COLORS.length];
-    const teamLabel = mdComfortable
-      ? `Care Team ${ctIdx + 1} — ${md.name.split(',')[0]} 1:${actualRatio}`
-      : `${md.name.split(',')[0]} — Solo`;
- 
+    const teamLabel = `Care Team ${ctIdx + 1} — ${md.name.split(',')[0]} 1:${actualRatio}`;
+
     careTeams.push({
-      id: ctIdx, md: md.name, ratio: mdComfortable ? `1:${actualRatio}` : '1:1 (Solo)',
+      id: ctIdx, md: md.name, ratio: `1:${actualRatio}`,
       rooms: ctRooms.map(r => r.room),
       anesthetists: ctAnests.map(a => a.name),
       color,
-      isSolo: !mdComfortable,
     });
     usedMDs.add(md.name);
- 
+
     ctRooms.forEach((room, i) => {
       const idx = rooms.findIndex(r => r.room === room.room);
       if (idx >= 0) {
@@ -360,14 +325,14 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
           ...rooms[idx],
           assignedProvider: md.name,
           anesthetist:   ctAnests[i]?.name || null,
-          careTeamId:    mdComfortable ? ctIdx : undefined,
-          careTeamLabel: mdComfortable ? teamLabel : null,
-          careTeamRatio: mdComfortable ? `1:${actualRatio}` : null,
-          isCareTeam:    mdComfortable,
+          careTeamId:    ctIdx,
+          careTeamLabel: teamLabel,
+          careTeamRatio: `1:${actualRatio}`,
+          isCareTeam:    true,
         };
       }
     });
- 
+
     ctIdx++;
   }
  
@@ -419,9 +384,10 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   }
  
   // ── Float anesthetists ────────────────────────────────────────
-  const floatAnests = anesthetistPool
-    .filter(a => !usedAnesthetists.has(a.name))
-    .slice(0, remainingFloatCount);
+  // Any AA not placed in a care team is a float — shown as FLOAT, not as
+  // "AVAILABLE ANESTHETISTS." There is no fixed float count; we just absorb
+  // whatever is left after greedy care team formation.
+  const floatAnests = anesthetistPool.filter(a => !usedAnesthetists.has(a.name));
  
   // Sort remaining MDs in strict priority order: Locums → Backup Call → Rank 3+
   const allAssignedNow = new Set([...soloUsed, ...usedMDs]);
