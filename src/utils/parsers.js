@@ -834,17 +834,10 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     ...qg.workingMDs.filter(p => p.role === '7/8 Hr Shift'),
   ];
  
-  // Block rooms — locum block-capable MDs first, then backup call/ranked
-  // Order respects: Nielson/Lambert/Powell (locums) → Dodwani/Pond (locums) → Pipito (backup call)
-  const blockOrder = ['Nielson, Mark', 'Lambert', 'Powell, Jason', 'Dodwani', 'Pond, William', 'Pipito, Nicholas A'];
- 
-  for (const room of result) {
-    if (room.assignedProvider || !room.blockRequired) continue;
-    for (const name of blockOrder) {
-      const p = allMDs.find(p => p.name === name && !used.has(p.name));
-      if (p) { room.assignedProvider = p.name; used.add(p.name); break; }
-    }
-  }
+  // Block rooms are NOT pre-assigned here. buildCareTeams includes them in the
+  // care team room pool, and block-capable locums pick them up as part of their
+  // care team. Pre-assigning here was consuming those locums before care team
+  // formation, locking them out of the AA pool and leaving AAs stranded as floats.
  
   // Endo — Brand always
   for (const room of result) {

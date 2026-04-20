@@ -295,7 +295,14 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     const actualRatio = Math.min(targetRatio, roomPool.length);
     if (actualRatio < 2) break;
 
-    const ctRooms = pickStaggeredRooms(roomPool, actualRatio);
+    // Block-capable MDs get block rooms sorted to the front of their pool so
+    // block-required rooms land with the right MD rather than whoever picks first.
+    const isBlockCapable = REGIONAL_CAPABLE.includes(md.name);
+    const orderedPool = isBlockCapable
+      ? [...roomPool.filter(r => r.blockRequired), ...roomPool.filter(r => !r.blockRequired)]
+      : roomPool;
+
+    const ctRooms = pickStaggeredRooms(orderedPool, actualRatio);
     if (ctRooms.length < 2) break;
 
     ctRooms.forEach(r => { roomPool = roomPool.filter(x => x.room !== r.room); });
