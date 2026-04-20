@@ -160,7 +160,8 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
               roomCareTeamSuitability(r) === 'ok'   ? 1 : 0,
   })).sort((a, b) => b.ctScore - a.ctScore);
  
-  let remainingRatios = [...ratios];
+  let remainingRatios     = [...ratios];
+  let remainingFloatCount = floatCount;
  
   const workingMDs   = qg.workingMDs || [];
  
@@ -259,7 +260,14 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
  
     usedMDs.add(endoMD.name);
     endoAnests.forEach(a => usedAnesthetists.add(a.name));
-    if (remainingRatios.length > 0) remainingRatios.shift();
+    // Recompute ratios based on AAs actually left after endo.
+    // Endo may commit fewer rooms than its "slot" in the ratio table,
+    // so a simple shift() leaves AAs stranded. Recalculating ensures
+    // the main OR teams absorb exactly what's left.
+    const postEndoAnestCount = Math.max(0, anesthetistCount - totalRooms);
+    const postEndoConfig     = getCareTeamConfig(postEndoAnestCount);
+    remainingRatios          = [...postEndoConfig.ratios];
+    remainingFloatCount      = postEndoConfig.floats;
  
     // Update real rooms in place
     visibleToUse.forEach((room, i) => {
@@ -299,6 +307,20 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     const actualRatio   = Math.min(desiredRatio, roomPool.length);
     if (actualRatio === 0) { usedMDs.add(md.name); continue; }
  
+    // Never form a 1:1 care team — minimum is 1:2.
+    // If only 1 room is left, give this MD the room solo (no AA) so
+    // the remaining AAs float rather than being wasted on a 1:1.
+    if (mdComfortable && actualRatio < 2) {
+      const soloRoom = pickStaggeredRooms(roomPool, 1)[0];
+      if (soloRoom) {
+        roomPool = roomPool.filter(x => x.room !== soloRoom.room);
+        const idx = rooms.findIndex(r => r.room === soloRoom.room);
+        if (idx >= 0) rooms[idx] = { ...rooms[idx], assignedProvider: md.name, anesthetist: null, isCareTeam: false, careTeamLabel: null };
+      }
+      usedMDs.add(md.name);
+      continue;
+    }
+
     const ctRooms = pickStaggeredRooms(roomPool, actualRatio);
     if (ctRooms.length === 0) { usedMDs.add(md.name); continue; }
  
@@ -399,7 +421,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   // ── Float anesthetists ────────────────────────────────────────
   const floatAnests = anesthetistPool
     .filter(a => !usedAnesthetists.has(a.name))
-    .slice(0, floatCount);
+    .slice(0, remainingFloatCount);
  
   // Sort remaining MDs in strict priority order: Locums → Backup Call → Rank 3+
   const allAssignedNow = new Set([...soloUsed, ...usedMDs]);
