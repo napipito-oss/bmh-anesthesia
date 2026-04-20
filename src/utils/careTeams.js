@@ -271,14 +271,16 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   }
  
   // ── Care Teams B+: Main OR ────────────────────────────────────
-  // CRITICAL: ctMDs is NOT filtered by CARE_TEAM_COMFORTABLE.
-  // Every MD gets rooms in strict priority order (Locums → Backup Call → Rank 3+).
-  // Filtering by care-team comfort here would let a backup call physician be
-  // pulled into a care team before a locum who isn't care-team-comfortable gets
-  // a solo room — violating the "locums before backup call" rule.
-  // CARE_TEAM_COMFORTABLE is checked LATER when deciding whether to attach
-  // anesthetists (making it a real 1:2/1:3 care team) vs leave the MD solo.
-  const ctMDs = availableMDs.filter(p => !usedMDs.has(p.name));
+  // ctMDs: only MDs who will actually form care teams (1:2 or 1:3).
+  // CARE_TEAM_AVOID (Eskew, Shepherd) and CARE_TEAM_RELUCTANT (DeWitt) are
+  // excluded here — they go to the solo fill pass instead. Including them here
+  // gave them a "1:1 (Solo)" care team label (which we never do) and wasted
+  // a ratio slot from the care team table, leaving AAs stranded as "available."
+  const ctMDs = availableMDs.filter(p =>
+    !usedMDs.has(p.name) &&
+    !CARE_TEAM_AVOID.includes(p.name) &&
+    !CARE_TEAM_RELUCTANT.includes(p.name)
+  );
  
   let ctIdx    = 1;
   let roomPool = [...scoredMain.filter(r => roomCareTeamSuitability(r) !== 'avoid')];
