@@ -55,8 +55,8 @@ export const PROVIDERS = {
     thoracicCapable:false,
     callPref:"Care team or easy solo",
     lateStay:"moderate", acuity:"high",
-    notes:"Abrasive — manage assignment optics carefully.",
-    flags:["Interpersonal — monitor placement","No blocks"]
+    notes:"Assignment optics matter — ensure workload is visibly equitable. Communication style is direct; balanced placement presentation is recommended.",
+    flags:["Assignment balance visibility matters","No blocks"]
   },
   "Raghove, Vikas": {
     type:"MD", employed:true, cardiac:false,
@@ -67,7 +67,7 @@ export const PROVIDERS = {
     callPref:"Care team assignment",
     lateStay:"low", acuity:"low-medium",
     notes:"Best in low-risk rooms. Medical direction preferred.",
-    flags:["Low acuity only","Avoid solo complex"]
+    flags:["Routine to moderate acuity preferred","Care team assignment recommended for complex cases"]
   },
   "Raghove, Punam": {
     type:"MD", employed:true, cardiac:false,
@@ -77,8 +77,8 @@ export const PROVIDERS = {
     thoracicCapable:false,
     callPref:"Care team assignment",
     lateStay:"low", acuity:"low",
-    notes:"Appropriate: lap chole, bowel, cystos, GI, GYN, basic ortho (no blocks). Keep simple.",
-    flags:["Low acuity only","No sick patients","No fast turnover","No blocks"]
+    notes:"Best fit: lap chole, bowel, cystos, GI, GYN, basic ortho (no blocks). Routine complexity preferred.",
+    flags:["Routine acuity preferred","Avoid high-complexity cases","Standard turnover pacing","No blocks"]
   },
   "Pipito, Nicholas A": {
     type:"MD", employed:true, cardiac:false, cardiacEmergencyOnly:true,
@@ -141,8 +141,8 @@ export const PROVIDERS = {
     careTeam:true, blockCapable:false, thoracicCapable:true,
     callPref:"Complex or high-acuity room",
     lateStay:"sometimes", acuity:"high",
-    notes:"Thorough but slow. Best: ICU-level, complex general. Not for fast rooms.",
-    flags:["Slow turnover","Avoid block rooms"]
+    notes:"Thorough and methodical — excels in complex, high-acuity and longer-duration cases. Best suited for cases where depth of care matters more than pace.",
+    flags:["Extended pacing — avoid fast-turnover rooms","No block rooms"]
   },
   "Lambert": {
     type:"MD", employed:false, locum:true, fullName:"Lambert, Mark",
@@ -152,8 +152,8 @@ export const PROVIDERS = {
     thoracicCapable:false,
     callPref:"Shoulder/ortho block rooms or general",
     lateStay:"rarely", acuity:"medium-high",
-    notes:"Lambert, Mark. Regional capable. Backup shoulder if Nielson out. Mild self-limiting on acuity.",
-    flags:["Acuity self-limiting — confirm complex cases"]
+    notes:"Lambert, Mark. Regional capable. Backup shoulder if Nielson out. Verify suitability for highest-complexity cases before assigning.",
+    flags:["Confirm suitability for highest-complexity cases"]
   },
   "Siddiqui": {
     type:"MD", employed:false, locum:true, fullName:"Siddiqui, Faisal A",
@@ -206,18 +206,18 @@ export const PROVIDERS = {
     thoracicCapable:false,
     callPref:"Ortho block rooms or general",
     lateStay:"rarely", acuity:"medium-high",
-    notes:"Identical profile to Lambert. Regional capable, fast turnover, complex cases.",
-    flags:["Acuity self-limiting — confirm complex cases"]
+    notes:"Identical profile to Lambert. Regional capable, fast turnover, complex cases. Verify suitability for highest-complexity cases before assigning.",
+    flags:["Confirm suitability for highest-complexity cases"]
   },
   "Fraley": {
     type:"MD", employed:false, locum:true,
     strengths:["Simple cases","EP","Gen surg","Endo","GYN"],
-    avoidances:["Complex blocks — claims capable, often declines day-of","High acuity"],
+    avoidances:["Complex blocks — confirm capability day-of","High acuity"],
     careTeam:true, blockCapable:false, thoracicCapable:false,
     callPref:"Simple to moderate cases only",
     lateStay:"rarely", acuity:"low-medium",
-    notes:"Near retirement, tires easily. Confirm block capability day-of.",
-    flags:["Confirm blocks day-of","Low acuity preferred","Near retirement"]
+    notes:"Senior provider with a lighter preferred pace. Block capability varies — confirm day-of.",
+    flags:["Confirm blocks day-of","Routine to moderate acuity preferred","Senior provider — honor preferred pace"]
   },
   "Watkins": {
     type:"MD", employed:false, locum:true,
@@ -226,8 +226,8 @@ export const PROVIDERS = {
     careTeam:true, blockCapable:false, thoracicCapable:false,
     callPref:"Any routine assignment",
     lateStay:"unlikely — near retirement", acuity:"medium",
-    notes:"Near retirement. Can do most cases but not preferred in any specific room. No blocks, slow between cases. Not a fast-turnover provider.",
-    flags:["Slow turnover — avoid fast rooms","No blocks","Near retirement — honor pace"]
+    notes:"Senior provider with broad general capability across most case types. No blocks. Extended pacing between cases — best in unhurried, non-time-pressured rooms.",
+    flags:["Extended pacing — avoid fast-turnover rooms","No blocks","Senior provider — honor preferred pace"]
   },
   "Shepherd": {
     type:"MD", employed:false, locum:true, fullName:"Shepherd, Meredith",
