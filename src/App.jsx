@@ -322,6 +322,7 @@ export default function App() {
   const [orCallChoice, setOrCallChoice] = useState(null);
   const [pendingRooms, setPendingRooms] = useState(null);
 
+  const [orCallWarning, setOrCallWarning] = useState('');
   const [resourceStructure, setResourceStructure] = useState({
     mainOR: '', endo: '', cath: '', boos: '', ir: ''
   });
@@ -338,11 +339,41 @@ export default function App() {
     const assigned = qg ? buildAssignments(roomsIn, qg, orChoice) : roomsIn;
     const history  = getAnesthetistLocationCounts();
     const ctResult = qg
-      ? buildCareTeams(assigned, qg, history, resourceStructure)
+      ? buildCareTeams(assigned, qg, history, resourceStructure, orChoice)
       : { rooms: assigned, careTeams: [], floats: [], available: [] };
     setRooms(ctResult.rooms);
     setCareTeamResult(ctResult);
     setOrCallChoice(orChoice);
+
+    // ── Post-build OR Call validation ───────────────────────────
+    // Catches choices that passed the prompt check but still failed
+    // once the full scheduling logic ran (e.g. "Available" but rooms
+    // went uncovered, or "Care Team" but no team slot was left).
+    if (orChoice && qg?.ORCall) {
+      const unassigned = (ctResult.rooms || []).filter(r => !r.assignedProvider && !r.isPhantom);
+      if (orChoice.type === 'available' && unassigned.length > 0) {
+        setOrCallWarning(
+          `⚠ OR Call (${qg.ORCall}) is set to Available, but ${unassigned.length} room${unassigned.length !== 1 ? 's' : ''} ` +
+          `(${unassigned.map(r => r.room).join(', ')}) ended up without coverage. ` +
+          `Re-build with OR Call assigned to cover the gap.`
+        );
+      } else if (orChoice.type === 'careteam') {
+        const inTeam = (ctResult.careTeams || []).some(ct => ct.md === qg.ORCall);
+        if (!inTeam) {
+          setOrCallWarning(
+            `⚠ OR Call (${qg.ORCall}) chose Care Team but wasn't placed in one — ` +
+            `all care team slots may have been filled before their turn. ` +
+            `Choose a specific room or re-check the assignment.`
+          );
+        } else {
+          setOrCallWarning('');
+        }
+      } else {
+        setOrCallWarning('');
+      }
+    } else {
+      setOrCallWarning('');
+    }
     if (fractionalPairs.length > 0) {
       setRoomPairs(buildPairsFromFractional(fractionalPairs, ctResult.rooms));
     }
@@ -720,7 +751,14 @@ export default function App() {
         )}
 
         {showORCallPrompt && qg?.ORCall && (
-          <ORCallPrompt orCallProvider={qg.ORCall} rooms={pendingRooms || []} onConfirm={handleORCallConfirm} onSkip={handleORCallSkip} />
+          <ORCallPrompt
+            orCallProvider={qg.ORCall}
+            rooms={pendingRooms || []}
+            anesthetistCount={qg?.Anesthetists?.filter(a => !a.isAdmin && !a.isOff).length || 0}
+            workingMDCount={qg?.workingMDs?.length || 0}
+            onConfirm={handleORCallConfirm}
+            onSkip={handleORCallSkip}
+          />
         )}
 
         {/* ── ASSIGNMENTS ── */}
@@ -787,6 +825,11 @@ export default function App() {
                     );
                   })()}
                 </div>
+              </div>
+            )}
+            {orCallWarning && (
+              <div style={{background:'#2a0f00',border:'1px solid #f97316',borderRadius:'var(--radius)',padding:'10px 14px',marginBottom:'12px',fontSize:'11px',color:'#fb923c',lineHeight:'1.6'}}>
+                {orCallWarning}
               </div>
             )}
             {critFlags.length>0 && <div style={{marginBottom:'12px'}}>{critFlags.map((f,i)=><div key={i} className="flag-crit">⚠ {f.room}: {f.msg}</div>)}</div>}

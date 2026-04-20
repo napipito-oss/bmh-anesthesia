@@ -23,12 +23,13 @@ const S = {
   history: { background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:'var(--radius)', padding:'8px 12px', marginBottom:'14px', fontSize:'10px', color:'var(--text-muted)' },
 };
 
-export default function ORCallPrompt({ orCallProvider, rooms, onConfirm, onSkip }) {
+export default function ORCallPrompt({ orCallProvider, rooms, anesthetistCount = 0, workingMDCount = 0, onConfirm, onSkip }) {
   const [choice, setChoice] = useState('available');
   const [prediction, setPrediction] = useState(null);
   const [callCount, setCallCount] = useState(0);
   const [summary, setSummary] = useState('');
   const [usedPrediction, setUsedPrediction] = useState(false);
+  const [warning, setWarning] = useState('');
 
   useEffect(() => {
     if (!orCallProvider) return;
@@ -53,11 +54,55 @@ export default function ORCallPrompt({ orCallProvider, rooms, onConfirm, onSkip 
   }, [orCallProvider]);
 
   const handleConfirm = () => {
-    const selectedRoom = rooms.find(r => r.room === choice);
+    setWarning('');
+
+    // ── "Available" feasibility check ───────────────────────────
+    // OR Call can only be available if there's at least 1 provider more than
+    // the minimum needed to cover all rooms without them.
+    if (choice === 'available') {
+      const nonCardiacRooms = rooms.filter(r => !r.isCardiac && !r.isCathEP);
+      const endoCount  = nonCardiacRooms.filter(r => r.isEndo).length;
+      const irCount    = nonCardiacRooms.filter(r => r.isIR).length;
+      const boosCount  = nonCardiacRooms.filter(r => r.isBOOS).length;
+      const mainCount  = nonCardiacRooms.filter(r => !r.isEndo && !r.isIR && !r.isBOOS).length;
+      // Best-case: care teams cover main OR at 1:3; endo/BOOS/IR each need 1 MD
+      const mdsNeeded =
+        Math.ceil(mainCount / 3) +
+        (endoCount > 0 ? 1 : 0) +
+        (boosCount > 0 ? 1 : 0) +
+        (irCount   > 0 ? 1 : 0);
+      const mdsWithoutORCall = workingMDCount - 1;
+      if (mdsWithoutORCall < mdsNeeded) {
+        setWarning(
+          `OR Call cannot be Available today — at least ${mdsNeeded} provider${mdsNeeded !== 1 ? 's' : ''} ` +
+          `needed to cover all rooms, but only ${mdsWithoutORCall} available without them. ` +
+          `Choose a room or Care Team instead.`
+        );
+        return;
+      }
+    }
+
+    if (choice === 'careteam' && anesthetistCount < 2) {
+      setWarning(`Cannot join a care team — only ${anesthetistCount} anesthetist${anesthetistCount === 1 ? '' : 's'} available today. Choose Available or a specific room instead.`);
+      return;
+    }
+    if (choice === 'careteam') {
+      const careTeamRooms = rooms.filter(r => !r.isCardiac && !r.isCathEP && !r.isIR && !r.isEndo);
+      if (careTeamRooms.length === 0) {
+        setWarning('No care-team-eligible rooms found in today\'s schedule. Choose Available or a specific room instead.');
+        return;
+      }
+    }
+
+    const type = choice === 'available' ? 'available'
+               : choice === 'careteam'  ? 'careteam'
+               : 'room';
+    const selectedRoom = type === 'room' ? rooms.find(r => r.room === choice) : null;
+
     onConfirm({
-      type: choice === 'available' ? 'available' : 'room',
-      room: choice === 'available' ? null : choice,
-      roomType: choice === 'available' ? null : classifyRoomType(choice, selectedRoom),
+      type,
+      room: type === 'room' ? choice : null,
+      roomType: type === 'room' ? classifyRoomType(choice, selectedRoom) : null,
       isChoice: true,
       isPredicted: usedPrediction,
     });
@@ -65,6 +110,7 @@ export default function ORCallPrompt({ orCallProvider, rooms, onConfirm, onSkip 
 
   const roomOptions = [
     { value: 'available', label: '— Available (no room assignment) —' },
+    { value: 'careteam',  label: '— Join a Care Team —' },
     ...rooms
       .filter(r => !r.isCardiac && !r.isCathEP)
       .map(r => ({
@@ -119,6 +165,12 @@ export default function ORCallPrompt({ orCallProvider, rooms, onConfirm, onSkip 
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
+
+        {warning && (
+          <div style={{background:'#2a0a0a',border:'1px solid #ef4444',borderRadius:'var(--radius)',padding:'8px 12px',marginBottom:'10px',fontSize:'10px',color:'#f87171',lineHeight:'1.5'}}>
+            ⚠ {warning}
+          </div>
+        )}
 
         <div style={S.btnRow}>
           <button style={S.btnSecondary} onClick={onSkip}>Skip for now</button>

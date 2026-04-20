@@ -790,6 +790,11 @@ export function buildAssignments(rooms, qg, orCallChoice) {
     if (orCallChoice.type === 'available') {
       used.add(qg.ORCall);
       orCallConsumed = true;
+    } else if (orCallChoice.type === 'careteam') {
+      // OR Call joins the care team pool in buildCareTeams — nothing to do here.
+      // orCallConsumed stays false so they aren't pre-consumed, but they also
+      // won't be assigned a specialty room below (endo/peds use named order lists).
+      orCallConsumed = false;
     } else if (orCallChoice.type === 'room' && orCallChoice.room) {
       // Try exact match first, then fuzzy (normalise spaces/leading zeros)
       const normalise = s => (s || '').toLowerCase().replace(/\s+/g, ' ').replace(/\b0+(\d)/g, '$1').trim();
