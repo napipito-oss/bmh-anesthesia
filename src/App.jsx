@@ -609,6 +609,28 @@ export default function App() {
   const today = new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
   const pairCount = Object.keys(roomPairs).length / 2;
 
+  // ── Board-tab derived values (computed unconditionally to avoid IIFE in JSX) ──
+  const boardCclDates    = Object.keys(cclWeekData).sort((a,b) => new Date(a)-new Date(b));
+  const boardCubeDates   = extractCubeDates(cubeRaw);
+  const boardQgHasDate   = extractQGendaDayName(qgRaw, selectedDate);
+  const boardCclKey      = isoToMDY(selectedDate);
+  const boardCclHasDate  = !!(selectedDate && cclWeekData[boardCclKey]);
+  const boardCubeHasDate = !!(selectedDate && boardCubeDates.includes(isoToMDY(selectedDate)));
+  const boardAllDates    = [...new Set([...boardCclDates, ...boardCubeDates])].sort((a,b) => new Date(a)-new Date(b));
+  const boardInputWarnings = [];
+  if (selectedDate) {
+    if (qgRaw   && !boardQgHasDate)  boardInputWarnings.push('QGenda data loaded but the selected day was not found — confirm the correct week is pasted.');
+    if (cclRaw  && !boardCclHasDate) boardInputWarnings.push(`OR.endo.CCL data pasted but no row found for ${boardCclKey || 'selected date'} — check the date format in the spreadsheet.`);
+    if (cubeRaw && !boardCubeHasDate) boardInputWarnings.push(`Cube data pasted but no cases found for ${boardCclKey || 'selected date'} — confirm the correct date range is included.`);
+  }
+  const boardChangeDate = (iso) => {
+    setSelectedDate(iso);
+    setSchedLoaded(false); setQgLoaded(false); setRooms([]); setQg(null);
+    setResourceLoaded(false); setResourceBypassed(false);
+    setCoverageGaps([]); setFractionalPairs([]); setRoomPairs({});
+    setOrCallWarning('');
+  };
+
   return (
     <div className="app">
       <header className="header">
@@ -646,41 +668,15 @@ export default function App() {
       <main className="body">
 
         {/* ── DAILY BOARD ── */}
-        {tab === 'board' && (() => {
-          // Derived availability — what dates/days exist in each pasted dataset
-          const cclDates    = Object.keys(cclWeekData).sort((a,b) => new Date(a)-new Date(b));
-          const cubeDates   = extractCubeDates(cubeRaw);
-          const qgHasDate   = extractQGendaDayName(qgRaw, selectedDate);
-          const cclKey      = isoToMDY(selectedDate);
-          const cclHasDate  = !!(selectedDate && cclWeekData[cclKey]);
-          const cubeHasDate = !!(selectedDate && cubeDates.includes(isoToMDY(selectedDate)));
-          const allDates    = [...new Set([...cclDates, ...cubeDates])].sort((a,b) => new Date(a)-new Date(b));
-
-          const changeDate = (iso) => {
-            setSelectedDate(iso);
-            setSchedLoaded(false); setQgLoaded(false); setRooms([]); setQg(null);
-            setResourceLoaded(false); setResourceBypassed(false);
-            setCoverageGaps([]); setFractionalPairs([]); setRoomPairs({});
-            setOrCallWarning('');
-          };
-
-          // Conflict warnings before building
-          const inputWarnings = [];
-          if (selectedDate) {
-            if (qgRaw && !qgHasDate) inputWarnings.push('QGenda data loaded but the selected day was not found — confirm the correct week is pasted.');
-            if (cclRaw && !cclHasDate) inputWarnings.push(`OR.endo.CCL data pasted but no row found for ${cclKey || 'selected date'} — check the date format in the spreadsheet.`);
-            if (cubeRaw && !cubeHasDate) inputWarnings.push(`Cube data pasted but no cases found for ${cclKey || 'selected date'} — confirm the correct date range is included.`);
-          }
-
-          return (
+        {tab === 'board' && (
           <div>
             {/* ══ BUILD DATE BAR (full-width) ══ */}
             <div className="card" style={{marginBottom:'16px'}}>
-              <div style={{display:'flex',alignItems:'center',gap:'20px',flexWrap:'wrap',marginBottom: allDates.length || inputWarnings.length ? '12px' : 0}}>
+              <div style={{display:'flex',alignItems:'center',gap:'20px',flexWrap:'wrap',marginBottom: boardAllDates.length || boardInputWarnings.length ? '12px' : 0}}>
                 <div>
                   <div style={{fontSize:'11px',fontWeight:'700',color:'var(--accent-blue)',letterSpacing:'1.5px',marginBottom:'6px'}}>BUILD DATE</div>
                   <input type="date" value={selectedDate}
-                    onChange={e => changeDate(e.target.value)}
+                    onChange={e => boardChangeDate(e.target.value)}
                     style={{background:'#fff',border:'2px solid var(--border)',borderRadius:'var(--radius)',color:selectedDate?'var(--text-primary)':'var(--text-muted)',padding:'8px 14px',fontSize:'14px',fontFamily:'var(--font-mono)',cursor:'pointer',outline:'none',fontWeight:'600'}}
                   />
                 </div>
@@ -693,22 +689,22 @@ export default function App() {
                 {/* Validation status pills */}
                 {selectedDate && (qgRaw || cclRaw || cubeRaw) && (
                   <div style={{display:'flex',gap:'8px',flexWrap:'wrap',marginLeft:'auto'}}>
-                    {qgRaw   && <span style={{background:qgHasDate?'#f0fdf4':'#fef2f2',border:`1px solid ${qgHasDate?'#16a34a':'#dc2626'}`,borderRadius:'999px',padding:'3px 10px',fontSize:'11px',fontWeight:'700',color:qgHasDate?'#15803d':'#dc2626'}}>{qgHasDate?'✓':'⚠'} QGenda</span>}
-                    {cclRaw  && <span style={{background:cclHasDate?'#f0fdf4':'#fef2f2',border:`1px solid ${cclHasDate?'#16a34a':'#dc2626'}`,borderRadius:'999px',padding:'3px 10px',fontSize:'11px',fontWeight:'700',color:cclHasDate?'#15803d':'#dc2626'}}>{cclHasDate?'✓':'⚠'} Coverage</span>}
-                    {cubeRaw && <span style={{background:cubeHasDate?'#f0fdf4':'#fef2f2',border:`1px solid ${cubeHasDate?'#16a34a':'#dc2626'}`,borderRadius:'999px',padding:'3px 10px',fontSize:'11px',fontWeight:'700',color:cubeHasDate?'#15803d':'#dc2626'}}>{cubeHasDate?'✓':'⚠'} Cube</span>}
+                    {qgRaw   && <span style={{background:boardQgHasDate?'#f0fdf4':'#fef2f2',border:`1px solid ${boardQgHasDate?'#16a34a':'#dc2626'}`,borderRadius:'999px',padding:'3px 10px',fontSize:'11px',fontWeight:'700',color:boardQgHasDate?'#15803d':'#dc2626'}}>{boardQgHasDate?'✓':'⚠'} QGenda</span>}
+                    {cclRaw  && <span style={{background:boardCclHasDate?'#f0fdf4':'#fef2f2',border:`1px solid ${boardCclHasDate?'#16a34a':'#dc2626'}`,borderRadius:'999px',padding:'3px 10px',fontSize:'11px',fontWeight:'700',color:boardCclHasDate?'#15803d':'#dc2626'}}>{boardCclHasDate?'✓':'⚠'} Coverage</span>}
+                    {cubeRaw && <span style={{background:boardCubeHasDate?'#f0fdf4':'#fef2f2',border:`1px solid ${boardCubeHasDate?'#16a34a':'#dc2626'}`,borderRadius:'999px',padding:'3px 10px',fontSize:'11px',fontWeight:'700',color:boardCubeHasDate?'#15803d':'#dc2626'}}>{boardCubeHasDate?'✓':'⚠'} Cube</span>}
                   </div>
                 )}
               </div>
 
               {/* Quick-select from detected dates */}
-              {allDates.length > 0 && (
-                <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap',marginBottom: inputWarnings.length ? '10px' : 0}}>
+              {boardAllDates.length > 0 && (
+                <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap',marginBottom: boardInputWarnings.length ? '10px' : 0}}>
                   <span style={{fontSize:'11px',fontWeight:'600',color:'var(--text-muted)'}}>DATES IN PASTED DATA:</span>
-                  {allDates.map(mdy => {
+                  {boardAllDates.map(mdy => {
                     const iso = mdyToISO(mdy);
                     const active = selectedDate === iso;
                     return (
-                      <button key={mdy} onClick={() => changeDate(iso)}
+                      <button key={mdy} onClick={() => boardChangeDate(iso)}
                         style={{background:active?'var(--accent-blue)':'var(--bg-elevated)',color:active?'#fff':'var(--text-secondary)',border:`1.5px solid ${active?'var(--accent-blue)':'var(--border)'}`,borderRadius:'var(--radius-sm)',padding:'5px 12px',fontSize:'12px',fontWeight:'700',cursor:'pointer',transition:'all 0.15s'}}>
                         {formatMDY(mdy)}
                       </button>
@@ -718,7 +714,7 @@ export default function App() {
               )}
 
               {/* Input conflict warnings */}
-              {inputWarnings.map((w,i) => (
+              {boardInputWarnings.map((w,i) => (
                 <div key={i} className="flag-warn" style={{marginTop:'6px'}}>{w}</div>
               ))}
             </div>
@@ -745,9 +741,9 @@ export default function App() {
                     placeholder={"Paste OR.Endo.CCL spreadsheet rows here (tab-separated, any number of days).\nThe app finds the row matching your selected date and extracts columns C–G."}
                     style={{marginBottom:'10px'}}
                   />
-                  {cclDates.length > 0 && (
-                    <div style={{fontSize:'11px',color:cclHasDate?'#15803d':'var(--text-muted)',fontWeight:'600',marginBottom:'10px'}}>
-                      {cclHasDate ? `✓ Coverage found for ${cclKey}` : `Dates in paste: ${cclDates.join(', ')} — selected date not matched`}
+                  {boardCclDates.length > 0 && (
+                    <div style={{fontSize:'11px',color:boardCclHasDate?'#15803d':'var(--text-muted)',fontWeight:'600',marginBottom:'10px'}}>
+                      {boardCclHasDate ? `✓ Coverage found for ${boardCclKey}` : `Dates in paste: ${boardCclDates.join(', ')} — selected date not matched`}
                     </div>
                   )}
                   <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'10px'}}>
@@ -821,8 +817,8 @@ export default function App() {
                   placeholder={"Paste QGenda export here — any date range works.\n\nMonday\nOR Call\tEskew, Gregory S\nBack Up Call\tSingh, Karampal\nLocum\tNielson, Mark\n..."}
                   disabled={!stepsUnlocked} style={{opacity:stepsUnlocked?1:0.4}} />
                 {qgRaw && selectedDate && (
-                  <div style={{fontSize:'11px',fontWeight:'600',color:qgHasDate?'#15803d':'#dc2626',margin:'6px 0'}}>
-                    {qgHasDate ? `✓ Staffing found for ${new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long'})}` : `⚠ No staffing found for ${new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long'})} — confirm the correct week is pasted`}
+                  <div style={{fontSize:'11px',fontWeight:'600',color:boardQgHasDate?'#15803d':'#dc2626',margin:'6px 0'}}>
+                    {boardQgHasDate ? `✓ Staffing found for ${new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long'})}` : `⚠ No staffing found for ${new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long'})} — confirm the correct week is pasted`}
                   </div>
                 )}
                 <button className="btn" onClick={loadQG} style={{marginTop:'8px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>LOAD STAFFING</button>
@@ -892,11 +888,11 @@ export default function App() {
                 <textarea className="textarea" value={cubeRaw} onChange={e=>setCubeRaw(e.target.value)}
                   placeholder={"Paste cube schedule here — any date range.\n\nBMH OR\n4/14/2026 7:30 AM\tBMHOR-2026-701\tBMH OR 10\t..."}
                   disabled={!stepsUnlocked} style={{opacity:stepsUnlocked?1:0.4}} />
-                {cubeRaw && cubeDates.length > 0 && (
-                  <div style={{fontSize:'11px',fontWeight:'600',color:cubeHasDate?'#15803d':'var(--text-muted)',margin:'6px 0'}}>
-                    {cubeHasDate
+                {cubeRaw && boardCubeDates.length > 0 && (
+                  <div style={{fontSize:'11px',fontWeight:'600',color:boardCubeHasDate?'#15803d':'var(--text-muted)',margin:'6px 0'}}>
+                    {boardCubeHasDate
                       ? `✓ Cases found for ${isoToMDY(selectedDate)}`
-                      : `Dates in paste: ${cubeDates.slice(0,5).join(', ')}${cubeDates.length>5?` +${cubeDates.length-5} more`:''} — selected date not matched`}
+                      : `Dates in paste: ${boardCubeDates.slice(0,5).join(', ')}${boardCubeDates.length>5?` +${boardCubeDates.length-5} more`:''} — selected date not matched`}
                   </div>
                 )}
                 <button className="btn" onClick={loadSchedule} style={{marginTop:'8px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>LOAD SCHEDULE</button>
@@ -923,9 +919,8 @@ export default function App() {
               )}
             </div>
             </div>{/* close grid-3 */}
-          </div>{/* close outer board div */}
-          );
-        })()}
+          </div>
+        )}
 
         {showORCallPrompt && qg?.ORCall && (
           <ORCallPrompt
