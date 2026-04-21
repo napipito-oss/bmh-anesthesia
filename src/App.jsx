@@ -10,6 +10,77 @@ import HistoryTab from './components/HistoryTab.jsx';
 import ORCallPrompt from './components/ORCallPrompt.jsx';
 import './App.css';
 
+// ── OR.endo.CCL week parser ───────────────────────────────────────
+// Accepts a pasted Excel/Sheets block (any number of rows).
+// Finds a date in the first 3 columns of each row, then reads
+// columns C–G (indices 2–6) as: Main OR, Endo, Cath, BOOS, IR.
+function parseORCCLWeek(raw) {
+  if (!raw?.trim()) return {};
+  const result = {};
+  for (const line of raw.trim().split('\n')) {
+    const cols = line.split('\t').map(c => c.trim());
+    if (cols.length < 3) continue;
+    let dateKey = null;
+    for (const col of cols.slice(0, 3)) {
+      const m = col.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+      if (m) {
+        const yr = m[3] ? (m[3].length === 2 ? '20'+m[3] : m[3]) : new Date().getFullYear();
+        dateKey = `${parseInt(m[1])}/${parseInt(m[2])}/${yr}`;
+        break;
+      }
+    }
+    if (!dateKey) continue;
+    // Columns C–G are indices 2–6 when the row has ≥7 cols (date + label + 5 values).
+    // If shorter, assume the first 5 numeric-looking cols are the values.
+    const valueCols = cols.length >= 7 ? cols.slice(2, 7) : cols.filter(c => /^[\d.]+$/.test(c)).slice(0, 5);
+    const vals = valueCols.map(v => v.replace(/[^0-9.]/g, ''));
+    if (vals.some(v => v)) {
+      result[dateKey] = { mainOR: vals[0]||'', endo: vals[1]||'', cath: vals[2]||'', boos: vals[3]||'', ir: vals[4]||'' };
+    }
+  }
+  return result;
+}
+
+function extractCubeDates(raw) {
+  const seen = new Set(), dates = [];
+  for (const line of (raw||'').split('\n')) {
+    const m = line.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
+    if (m && !seen.has(m[1])) { seen.add(m[1]); dates.push(m[1]); }
+  }
+  return dates.sort((a, b) => new Date(a) - new Date(b));
+}
+
+function extractQGendaDayName(raw, targetISO) {
+  if (!raw || !targetISO) return false;
+  const d = new Date(targetISO + 'T12:00:00');
+  const dayName = d.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+  const dateLabel = d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).toLowerCase();
+  for (const line of raw.split('\n')) {
+    const first = line.split('\t')[0]?.trim().toLowerCase();
+    if (first === dayName || first === dateLabel) return true;
+  }
+  return false;
+}
+
+function isoToMDY(iso) {
+  if (!iso) return '';
+  const d = new Date(iso + 'T12:00:00');
+  return `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
+}
+
+function mdyToISO(mdy) {
+  if (!mdy) return '';
+  const [m, d, y] = mdy.split('/');
+  if (!m || !d || !y) return '';
+  return `${y.length === 2 ? '20'+y : y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+}
+
+function formatMDY(mdy) {
+  try {
+    return new Date(mdyToISO(mdy)+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+  } catch { return mdy; }
+}
+
 const ROLE_COLORS = {
   'OR Call (#1)': '#ef4444',
   'Back Up Call (#2)': '#f97316',
@@ -323,8 +394,8 @@ export default function App() {
   const [pendingRooms, setPendingRooms] = useState(null);
 
   const [orCallWarning, setOrCallWarning] = useState('');
-  const [cclPasteOpen, setCclPasteOpen] = useState(false);
-  const [cclPasteRaw, setCclPasteRaw] = useState('');
+  const [cclRaw, setCclRaw] = useState('');
+  const [cclWeekData, setCclWeekData] = useState({});
   const [resourceStructure, setResourceStructure] = useState({
     mainOR: '', endo: '', cath: '', boos: '', ir: ''
   });
@@ -334,6 +405,13 @@ export default function App() {
   const [fractionalPairs, setFractionalPairs] = useState([]);
 
   const stepsUnlocked = resourceLoaded || resourceBypassed;
+
+  // When the selected date changes and CCL week data is loaded, auto-fill the coverage fields.
+  useEffect(() => {
+    if (!selectedDate || !Object.keys(cclWeekData).length) return;
+    const found = cclWeekData[isoToMDY(selectedDate)];
+    if (found) setResourceStructure(found);
+  }, [selectedDate, cclWeekData]);
 
   const finishRef = useRef(null);
 
@@ -568,88 +646,135 @@ export default function App() {
       <main className="body">
 
         {/* ── DAILY BOARD ── */}
-        {tab === 'board' && (
-          <div className="grid-3">
-            <div>
-              <div className="section-label">STEP 1 — OR.ENDO.CCL RESOURCE STRUCTURE</div>
-              <div className="card">
-                <div style={{marginBottom:'12px'}}>
-                  <div style={{fontSize:'10px',color:'var(--accent-blue)',letterSpacing:'2px',marginBottom:'6px'}}>SELECT DATE TO BUILD</div>
-                  <div style={{display:'flex',alignItems:'center',gap:'10px',flexWrap:'wrap'}}>
-                    <input type="date" value={selectedDate}
-                      onChange={e => {
-                        setSelectedDate(e.target.value);
-                        setSchedLoaded(false); setQgLoaded(false); setRooms([]); setQg(null);
-                        setResourceLoaded(false); setResourceBypassed(false);
-                        setCoverageGaps([]); setFractionalPairs([]); setRoomPairs({});
-                      }}
-                      style={{background:'var(--bg-base)',border:'1px solid var(--border-bright)',borderRadius:'var(--radius)',color:selectedDate?'var(--text-primary)':'var(--text-muted)',padding:'7px 12px',fontSize:'12px',fontFamily:'var(--font-mono)',cursor:'pointer',outline:'none'}}
-                    />
-                    {selectedDate && <span style={{fontSize:'11px',color:'var(--accent-blue)',fontWeight:'600'}}>{new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}</span>}
+        {tab === 'board' && (() => {
+          // Derived availability — what dates/days exist in each pasted dataset
+          const cclDates    = Object.keys(cclWeekData).sort((a,b) => new Date(a)-new Date(b));
+          const cubeDates   = extractCubeDates(cubeRaw);
+          const qgHasDate   = extractQGendaDayName(qgRaw, selectedDate);
+          const cclKey      = isoToMDY(selectedDate);
+          const cclHasDate  = !!(selectedDate && cclWeekData[cclKey]);
+          const cubeHasDate = !!(selectedDate && cubeDates.includes(isoToMDY(selectedDate)));
+          const allDates    = [...new Set([...cclDates, ...cubeDates])].sort((a,b) => new Date(a)-new Date(b));
+
+          const changeDate = (iso) => {
+            setSelectedDate(iso);
+            setSchedLoaded(false); setQgLoaded(false); setRooms([]); setQg(null);
+            setResourceLoaded(false); setResourceBypassed(false);
+            setCoverageGaps([]); setFractionalPairs([]); setRoomPairs({});
+            setOrCallWarning('');
+          };
+
+          // Conflict warnings before building
+          const inputWarnings = [];
+          if (selectedDate) {
+            if (qgRaw && !qgHasDate) inputWarnings.push('QGenda data loaded but the selected day was not found — confirm the correct week is pasted.');
+            if (cclRaw && !cclHasDate) inputWarnings.push(`OR.endo.CCL data pasted but no row found for ${cclKey || 'selected date'} — check the date format in the spreadsheet.`);
+            if (cubeRaw && !cubeHasDate) inputWarnings.push(`Cube data pasted but no cases found for ${cclKey || 'selected date'} — confirm the correct date range is included.`);
+          }
+
+          return (
+          <div>
+            {/* ══ BUILD DATE BAR (full-width) ══ */}
+            <div className="card" style={{marginBottom:'16px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:'20px',flexWrap:'wrap',marginBottom: allDates.length || inputWarnings.length ? '12px' : 0}}>
+                <div>
+                  <div style={{fontSize:'11px',fontWeight:'700',color:'var(--accent-blue)',letterSpacing:'1.5px',marginBottom:'6px'}}>BUILD DATE</div>
+                  <input type="date" value={selectedDate}
+                    onChange={e => changeDate(e.target.value)}
+                    style={{background:'#fff',border:'2px solid var(--border)',borderRadius:'var(--radius)',color:selectedDate?'var(--text-primary)':'var(--text-muted)',padding:'8px 14px',fontSize:'14px',fontFamily:'var(--font-mono)',cursor:'pointer',outline:'none',fontWeight:'600'}}
+                  />
+                </div>
+                {selectedDate
+                  ? <div style={{fontSize:'17px',fontWeight:'700',color:'var(--text-primary)'}}>
+                      {new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}
+                    </div>
+                  : <div style={{fontSize:'13px',color:'var(--accent-amber)',fontWeight:'600'}}>⚠ Select a date to begin</div>
+                }
+                {/* Validation status pills */}
+                {selectedDate && (qgRaw || cclRaw || cubeRaw) && (
+                  <div style={{display:'flex',gap:'8px',flexWrap:'wrap',marginLeft:'auto'}}>
+                    {qgRaw   && <span style={{background:qgHasDate?'#f0fdf4':'#fef2f2',border:`1px solid ${qgHasDate?'#16a34a':'#dc2626'}`,borderRadius:'999px',padding:'3px 10px',fontSize:'11px',fontWeight:'700',color:qgHasDate?'#15803d':'#dc2626'}}>{qgHasDate?'✓':'⚠'} QGenda</span>}
+                    {cclRaw  && <span style={{background:cclHasDate?'#f0fdf4':'#fef2f2',border:`1px solid ${cclHasDate?'#16a34a':'#dc2626'}`,borderRadius:'999px',padding:'3px 10px',fontSize:'11px',fontWeight:'700',color:cclHasDate?'#15803d':'#dc2626'}}>{cclHasDate?'✓':'⚠'} Coverage</span>}
+                    {cubeRaw && <span style={{background:cubeHasDate?'#f0fdf4':'#fef2f2',border:`1px solid ${cubeHasDate?'#16a34a':'#dc2626'}`,borderRadius:'999px',padding:'3px 10px',fontSize:'11px',fontWeight:'700',color:cubeHasDate?'#15803d':'#dc2626'}}>{cubeHasDate?'✓':'⚠'} Cube</span>}
                   </div>
-                  {!selectedDate && <div style={{fontSize:'10px',color:'var(--accent-amber)',marginTop:'5px'}}>⚠ Select a date first</div>}
-                </div>
-                <div className="card-hint">Enter numbers from the OR.Endo.CCL spreadsheet row, or paste the row directly and let the app extract the values. Decimals allowed (e.g. 0.5).</div>
-
-                {/* ── Paste-from-spreadsheet toggle ── */}
-                <div style={{marginBottom:'10px'}}>
-                  <button
-                    onClick={() => { setCclPasteOpen(o => !o); setCclPasteRaw(''); }}
-                    disabled={!selectedDate}
-                    style={{background:'var(--bg-elevated)',color:'var(--accent-blue)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',padding:'5px 12px',fontSize:'11px',fontWeight:'600',cursor:'pointer',opacity:selectedDate?1:0.5}}
-                  >
-                    {cclPasteOpen ? '✕ Close paste' : '⊕ Paste row from spreadsheet'}
-                  </button>
-                  {cclPasteOpen && (
-                    <div style={{marginTop:'8px'}}>
-                      <div style={{fontSize:'11px',color:'var(--text-muted)',marginBottom:'5px'}}>
-                        Copy the row for this date from OR.Endo.CCL and paste it here. The app reads columns C–G (Main OR, Endo, Cath, BOOS, IR).
-                      </div>
-                      <textarea
-                        rows={2}
-                        value={cclPasteRaw}
-                        onChange={e => {
-                          const raw = e.target.value;
-                          setCclPasteRaw(raw);
-                          // Parse on change — split by tab, pull cols C–G (indices 2–6)
-                          const cols = raw.split('\t');
-                          if (cols.length >= 7) {
-                            const [mainOR, endo, cath, boos, ir] = cols.slice(2, 7).map(v => v.trim().replace(/[^0-9.]/g, ''));
-                            setResourceStructure({ mainOR: mainOR||'', endo: endo||'', cath: cath||'', boos: boos||'', ir: ir||'' });
-                          }
-                        }}
-                        placeholder="Paste the full spreadsheet row here (tab-separated)…"
-                        style={{width:'100%',background:'var(--bg-base)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',color:'var(--text-primary)',padding:'8px',fontSize:'11px',fontFamily:'var(--font-mono)',resize:'vertical',outline:'none'}}
-                      />
-                    </div>
-                  )}
-                </div>
-
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'10px'}}>
-                  {[{key:'mainOR',label:'MAIN OR'},{key:'endo',label:'ENDO'},{key:'cath',label:'CATH LAB'},{key:'boos',label:'BOOS (Ortho AS)'},{key:'ir',label:'IR'}].map(({ key, label }) => (
-                    <div key={key}>
-                      <div style={{fontSize:'10px',color:'var(--text-muted)',fontWeight:'600',letterSpacing:'1px',marginBottom:'3px'}}>{label}</div>
-                      <input type="number" min="0" max="15" step="0.5"
-                        value={resourceStructure[key]}
-                        onChange={e => setResourceStructure(prev => ({ ...prev, [key]: e.target.value }))}
-                        placeholder="0" disabled={!selectedDate}
-                        style={{width:'100%',background:'var(--bg-base)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',color:'var(--text-primary)',padding:'6px 10px',fontSize:'13px',fontFamily:'var(--font-mono)',outline:'none',textAlign:'center',opacity:selectedDate?1:0.5}}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div style={{display:'flex',gap:'8px'}}>
-                  <button className="btn" onClick={() => loadResourceStructure()} disabled={!selectedDate} style={{flex:1,opacity:selectedDate?1:0.5}}>CONFIRM COVERAGE</button>
-                  <button onClick={() => { setResourceBypassed(true); setResourceLoaded(false); setCoverageGaps([]); setFractionalPairs([]); }} disabled={!selectedDate}
-                    style={{background:'var(--bg-elevated)',color:'var(--text-muted)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'9px 14px',fontSize:'10px',fontFamily:'var(--font-mono)',cursor:'pointer',opacity:selectedDate?1:0.5}}>
-                    BYPASS
-                  </button>
-                </div>
-                {resourceBypassed && !resourceLoaded && (
-                  <div className="flag-warn" style={{marginTop:'8px'}}>⚠ Coverage data bypassed — assignments will run without coverage ceiling. Steps 2 and 3 are now unlocked.</div>
                 )}
               </div>
-              {resourceLoaded && (
+
+              {/* Quick-select from detected dates */}
+              {allDates.length > 0 && (
+                <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap',marginBottom: inputWarnings.length ? '10px' : 0}}>
+                  <span style={{fontSize:'11px',fontWeight:'600',color:'var(--text-muted)'}}>DATES IN PASTED DATA:</span>
+                  {allDates.map(mdy => {
+                    const iso = mdyToISO(mdy);
+                    const active = selectedDate === iso;
+                    return (
+                      <button key={mdy} onClick={() => changeDate(iso)}
+                        style={{background:active?'var(--accent-blue)':'var(--bg-elevated)',color:active?'#fff':'var(--text-secondary)',border:`1.5px solid ${active?'var(--accent-blue)':'var(--border)'}`,borderRadius:'var(--radius-sm)',padding:'5px 12px',fontSize:'12px',fontWeight:'700',cursor:'pointer',transition:'all 0.15s'}}>
+                        {formatMDY(mdy)}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Input conflict warnings */}
+              {inputWarnings.map((w,i) => (
+                <div key={i} className="flag-warn" style={{marginTop:'6px'}}>{w}</div>
+              ))}
+            </div>
+
+            {/* ══ Three data-entry columns ══ */}
+            <div className="grid-3">
+              {/* ── STEP 1: COVERAGE ── */}
+              <div>
+                <div className="section-label">STEP 1 — OR.ENDO.CCL COVERAGE</div>
+                <div className="card">
+                  <div className="card-hint" style={{marginBottom:'10px'}}>
+                    Paste a week (or any rows) from OR.Endo.CCL. The app reads columns C–G for the selected date and fills the fields below automatically. You can also edit the numbers directly.
+                  </div>
+                  <textarea className="textarea" rows={4} value={cclRaw}
+                    onChange={e => {
+                      setCclRaw(e.target.value);
+                      const parsed = parseORCCLWeek(e.target.value);
+                      setCclWeekData(parsed);
+                      if (selectedDate) {
+                        const found = parsed[isoToMDY(selectedDate)];
+                        if (found) setResourceStructure(found);
+                      }
+                    }}
+                    placeholder={"Paste OR.Endo.CCL spreadsheet rows here (tab-separated, any number of days).\nThe app finds the row matching your selected date and extracts columns C–G."}
+                    style={{marginBottom:'10px'}}
+                  />
+                  {cclDates.length > 0 && (
+                    <div style={{fontSize:'11px',color:cclHasDate?'#15803d':'var(--text-muted)',fontWeight:'600',marginBottom:'10px'}}>
+                      {cclHasDate ? `✓ Coverage found for ${cclKey}` : `Dates in paste: ${cclDates.join(', ')} — selected date not matched`}
+                    </div>
+                  )}
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'10px'}}>
+                    {[{key:'mainOR',label:'MAIN OR'},{key:'endo',label:'ENDO'},{key:'cath',label:'CATH LAB'},{key:'boos',label:'BOOS'},{key:'ir',label:'IR'}].map(({ key, label }) => (
+                      <div key={key}>
+                        <div style={{fontSize:'10px',color:'var(--text-muted)',fontWeight:'700',letterSpacing:'1px',marginBottom:'3px'}}>{label}</div>
+                        <input type="number" min="0" max="15" step="0.5"
+                          value={resourceStructure[key]}
+                          onChange={e => setResourceStructure(prev => ({ ...prev, [key]: e.target.value }))}
+                          placeholder="0" disabled={!selectedDate}
+                          style={{width:'100%',background:'#fff',border:'1.5px solid var(--border)',borderRadius:'var(--radius-sm)',color:'var(--text-primary)',padding:'6px 10px',fontSize:'14px',fontFamily:'var(--font-mono)',fontWeight:'700',outline:'none',textAlign:'center',opacity:selectedDate?1:0.5}}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{display:'flex',gap:'8px'}}>
+                    <button className="btn" onClick={() => loadResourceStructure()} disabled={!selectedDate} style={{flex:1,opacity:selectedDate?1:0.5}}>CONFIRM COVERAGE</button>
+                    <button onClick={() => { setResourceBypassed(true); setResourceLoaded(false); setCoverageGaps([]); setFractionalPairs([]); }} disabled={!selectedDate}
+                      style={{background:'var(--bg-elevated)',color:'var(--text-muted)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'9px 14px',fontSize:'11px',cursor:'pointer',fontWeight:'600',opacity:selectedDate?1:0.5}}>
+                      BYPASS
+                    </button>
+                  </div>
+                  {resourceBypassed && !resourceLoaded && (
+                    <div className="flag-warn" style={{marginTop:'8px'}}>⚠ Coverage bypassed — assignments run without coverage ceiling.</div>
+                  )}
+                </div>
+                {resourceLoaded && (
                 <div style={{marginTop:'12px'}}>
                   {coverageGaps.length === 0 ? (
                     <div style={{background:'#f0fdf4',border:'1.5px solid #16a34a',borderRadius:'var(--radius)',padding:'10px 12px'}}>
@@ -686,14 +811,21 @@ export default function App() {
               )}
             </div>
 
+            {/* ── STEP 2: QGENDA ── */}
             <div>
-              <div className="section-label">STEP 2 — QGENDA EXPORT</div>
+              <div className="section-label">STEP 2 — QGENDA STAFFING</div>
               <div className="card">
-                {!stepsUnlocked && <div style={{fontSize:'10px',color:'var(--accent-amber)',marginBottom:'8px'}}>⚠ Confirm or bypass Step 1 first</div>}
+                <div className="card-hint" style={{marginBottom:'8px'}}>Paste a day, week, or any amount of QGenda data. The app finds the day matching your selected date automatically.</div>
+                {!stepsUnlocked && <div className="flag-warn" style={{marginBottom:'8px'}}>⚠ Confirm or bypass Step 1 first</div>}
                 <textarea className="textarea" value={qgRaw} onChange={e=>setQgRaw(e.target.value)}
-                  placeholder={"Paste the full week — the app filters to the date selected in Step 1.\n\nOR Call\tEskew, Gregory S\nBack Up Call\tSingh, Karampal\nLocum\tNielson, Mark\n..."}
+                  placeholder={"Paste QGenda export here — any date range works.\n\nMonday\nOR Call\tEskew, Gregory S\nBack Up Call\tSingh, Karampal\nLocum\tNielson, Mark\n..."}
                   disabled={!stepsUnlocked} style={{opacity:stepsUnlocked?1:0.4}} />
-                <button className="btn" onClick={loadQG} style={{marginTop:'10px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>LOAD STAFFING</button>
+                {qgRaw && selectedDate && (
+                  <div style={{fontSize:'11px',fontWeight:'600',color:qgHasDate?'#15803d':'#dc2626',margin:'6px 0'}}>
+                    {qgHasDate ? `✓ Staffing found for ${new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long'})}` : `⚠ No staffing found for ${new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long'})} — confirm the correct week is pasted`}
+                  </div>
+                )}
+                <button className="btn" onClick={loadQG} style={{marginTop:'8px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>LOAD STAFFING</button>
               </div>
               {qgLoaded && qg && (
                 <div style={{marginTop:'14px'}}>
@@ -741,7 +873,7 @@ export default function App() {
                         {qg.Anesthetists.filter(a=>!a.isOff).map(a=>(
                           <div key={a.name} className="card anest-card" style={{borderLeft:`3px solid ${a.isAdmin?'#374151':'#ec4899'}`,opacity:a.isAdmin?0.45:1}}>
                             <div className="anest-name">{a.name}</div>
-                            <div className="anest-shift" style={{color:a.isAdmin?'#475569':'#f9a8d4'}}>{a.isAdmin?'ADMIN — NOT IN OR':(ANESTHETIST_SHIFTS[`Anesthetist ${a.shift}`]?.label||a.shift)}</div>
+                            <div className="anest-shift" style={{color:a.isAdmin?'#94a3b8':'#be185d'}}>{a.isAdmin?'ADMIN — NOT IN OR':(ANESTHETIST_SHIFTS[`Anesthetist ${a.shift}`]?.label||a.shift)}</div>
                           </div>
                         ))}
                       </div>
@@ -751,17 +883,23 @@ export default function App() {
               )}
             </div>
 
+            {/* ── STEP 3: CUBE ── */}
             <div>
-              <div className="section-label">STEP 3 — CUBE SCHEDULE (paste all data)</div>
+              <div className="section-label">STEP 3 — CUBE SCHEDULE</div>
               <div className="card">
-                {!stepsUnlocked && <div style={{fontSize:'10px',color:'var(--accent-amber)',marginBottom:'8px'}}>⚠ Confirm or bypass Step 1 first</div>}
-                <div className="card-hint">Paste the full cube file — multiple days at once is fine. The parser filters to{' '}
-                  {selectedDate ? <strong>{new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'})}</strong> : <span style={{color:'var(--accent-amber)'}}>the date selected in Step 1</span>}.
-                </div>
+                <div className="card-hint" style={{marginBottom:'8px'}}>Paste any days of cube data — a single day, a week, whatever you have. The app extracts cases for the selected date only.</div>
+                {!stepsUnlocked && <div className="flag-warn" style={{marginBottom:'8px'}}>⚠ Confirm or bypass Step 1 first</div>}
                 <textarea className="textarea" value={cubeRaw} onChange={e=>setCubeRaw(e.target.value)}
-                  placeholder={"Paste entire cube schedule here — all dates, all areas.\nDate is set from Step 1.\n\nBMH OR\n4/14/2026 7:30 AM\tBMHOR-2026-701\tBMH OR 10\t..."}
+                  placeholder={"Paste cube schedule here — any date range.\n\nBMH OR\n4/14/2026 7:30 AM\tBMHOR-2026-701\tBMH OR 10\t..."}
                   disabled={!stepsUnlocked} style={{opacity:stepsUnlocked?1:0.4}} />
-                <button className="btn" onClick={loadSchedule} style={{marginTop:'10px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>LOAD SCHEDULE</button>
+                {cubeRaw && cubeDates.length > 0 && (
+                  <div style={{fontSize:'11px',fontWeight:'600',color:cubeHasDate?'#15803d':'var(--text-muted)',margin:'6px 0'}}>
+                    {cubeHasDate
+                      ? `✓ Cases found for ${isoToMDY(selectedDate)}`
+                      : `Dates in paste: ${cubeDates.slice(0,5).join(', ')}${cubeDates.length>5?` +${cubeDates.length-5} more`:''} — selected date not matched`}
+                  </div>
+                )}
+                <button className="btn" onClick={loadSchedule} style={{marginTop:'8px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>LOAD SCHEDULE</button>
               </div>
               {schedLoaded && (
                 <div style={{marginTop:'14px'}}>
@@ -784,8 +922,10 @@ export default function App() {
                 </div>
               )}
             </div>
-          </div>
-        )}
+            </div>{/* close grid-3 */}
+          </div>{/* close outer board div */}
+          );
+        })()}
 
         {showORCallPrompt && qg?.ORCall && (
           <ORCallPrompt
