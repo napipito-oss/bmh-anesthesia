@@ -323,6 +323,8 @@ export default function App() {
   const [pendingRooms, setPendingRooms] = useState(null);
 
   const [orCallWarning, setOrCallWarning] = useState('');
+  const [cclPasteOpen, setCclPasteOpen] = useState(false);
+  const [cclPasteRaw, setCclPasteRaw] = useState('');
   const [resourceStructure, setResourceStructure] = useState({
     mainOR: '', endo: '', cath: '', boos: '', ir: ''
   });
@@ -587,11 +589,46 @@ export default function App() {
                   </div>
                   {!selectedDate && <div style={{fontSize:'10px',color:'var(--accent-amber)',marginTop:'5px'}}>⚠ Select a date first</div>}
                 </div>
-                <div className="card-hint">Enter today's row from the OR.Endo.CCL Resource Structure spreadsheet. Decimals allowed (e.g. 0.5). This is the source of truth for what we cover.</div>
+                <div className="card-hint">Enter numbers from the OR.Endo.CCL spreadsheet row, or paste the row directly and let the app extract the values. Decimals allowed (e.g. 0.5).</div>
+
+                {/* ── Paste-from-spreadsheet toggle ── */}
+                <div style={{marginBottom:'10px'}}>
+                  <button
+                    onClick={() => { setCclPasteOpen(o => !o); setCclPasteRaw(''); }}
+                    disabled={!selectedDate}
+                    style={{background:'var(--bg-elevated)',color:'var(--accent-blue)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',padding:'5px 12px',fontSize:'11px',fontWeight:'600',cursor:'pointer',opacity:selectedDate?1:0.5}}
+                  >
+                    {cclPasteOpen ? '✕ Close paste' : '⊕ Paste row from spreadsheet'}
+                  </button>
+                  {cclPasteOpen && (
+                    <div style={{marginTop:'8px'}}>
+                      <div style={{fontSize:'11px',color:'var(--text-muted)',marginBottom:'5px'}}>
+                        Copy the row for this date from OR.Endo.CCL and paste it here. The app reads columns C–G (Main OR, Endo, Cath, BOOS, IR).
+                      </div>
+                      <textarea
+                        rows={2}
+                        value={cclPasteRaw}
+                        onChange={e => {
+                          const raw = e.target.value;
+                          setCclPasteRaw(raw);
+                          // Parse on change — split by tab, pull cols C–G (indices 2–6)
+                          const cols = raw.split('\t');
+                          if (cols.length >= 7) {
+                            const [mainOR, endo, cath, boos, ir] = cols.slice(2, 7).map(v => v.trim().replace(/[^0-9.]/g, ''));
+                            setResourceStructure({ mainOR: mainOR||'', endo: endo||'', cath: cath||'', boos: boos||'', ir: ir||'' });
+                          }
+                        }}
+                        placeholder="Paste the full spreadsheet row here (tab-separated)…"
+                        style={{width:'100%',background:'var(--bg-base)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',color:'var(--text-primary)',padding:'8px',fontSize:'11px',fontFamily:'var(--font-mono)',resize:'vertical',outline:'none'}}
+                      />
+                    </div>
+                  )}
+                </div>
+
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'10px'}}>
                   {[{key:'mainOR',label:'MAIN OR'},{key:'endo',label:'ENDO'},{key:'cath',label:'CATH LAB'},{key:'boos',label:'BOOS (Ortho AS)'},{key:'ir',label:'IR'}].map(({ key, label }) => (
                     <div key={key}>
-                      <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>{label}</div>
+                      <div style={{fontSize:'10px',color:'var(--text-muted)',fontWeight:'600',letterSpacing:'1px',marginBottom:'3px'}}>{label}</div>
                       <input type="number" min="0" max="15" step="0.5"
                         value={resourceStructure[key]}
                         onChange={e => setResourceStructure(prev => ({ ...prev, [key]: e.target.value }))}
@@ -654,7 +691,7 @@ export default function App() {
               <div className="card">
                 {!stepsUnlocked && <div style={{fontSize:'10px',color:'var(--accent-amber)',marginBottom:'8px'}}>⚠ Confirm or bypass Step 1 first</div>}
                 <textarea className="textarea" value={qgRaw} onChange={e=>setQgRaw(e.target.value)}
-                  placeholder={"Paste full week QGenda Calendar By Task export...\n\nOR Call\tEskew, Gregory S\nBack Up Call\tSingh, Karampal\nLocum\tNielson, Mark\n..."}
+                  placeholder={"Paste the full week — the app filters to the date selected in Step 1.\n\nOR Call\tEskew, Gregory S\nBack Up Call\tSingh, Karampal\nLocum\tNielson, Mark\n..."}
                   disabled={!stepsUnlocked} style={{opacity:stepsUnlocked?1:0.4}} />
                 <button className="btn" onClick={loadQG} style={{marginTop:'10px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>LOAD STAFFING</button>
               </div>
@@ -718,7 +755,7 @@ export default function App() {
               <div className="section-label">STEP 3 — CUBE SCHEDULE (paste all data)</div>
               <div className="card">
                 {!stepsUnlocked && <div style={{fontSize:'10px',color:'var(--accent-amber)',marginBottom:'8px'}}>⚠ Confirm or bypass Step 1 first</div>}
-                <div className="card-hint">Paste the full SharePoint cube file. The parser will automatically filter to{' '}
+                <div className="card-hint">Paste the full cube file — multiple days at once is fine. The parser filters to{' '}
                   {selectedDate ? <strong>{new Date(selectedDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'})}</strong> : <span style={{color:'var(--accent-amber)'}}>the date selected in Step 1</span>}.
                 </div>
                 <textarea className="textarea" value={cubeRaw} onChange={e=>setCubeRaw(e.target.value)}
