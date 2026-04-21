@@ -116,7 +116,10 @@ function needsAnesthesia(procedure, surgeon, room) {
     return { needs: true, reason: 'Cardioversion — always needs anesthesia', cardiac: true };
  
   if (proc.includes('watchman'))
-    return { needs: true, reason: 'Watchman — always needs anesthesia', cardiac: true };
+    return { needs: true, reason: 'Watchman — always needs anesthesia (complex TEE); Munro preferred', cardiac: true };
+
+  if (['mitraclip','mitra clip','mitral clip','transcatheter mitral'].some(k => proc.includes(k)))
+    return { needs: true, reason: 'MitraClip — always needs anesthesia; CV primary MDs only', cardiac: true };
  
   // IR room or cryoablation — always needs anesthesia, checked BEFORE EP logic
   // because 'cryoablation' contains 'ablation' which triggers the EP exclusion path
@@ -312,13 +315,20 @@ export function classifyCase(procedure, surgeon, room) {
   if (roomType.isIR)
     flags.push({ level: 'info', msg: 'IR case — cell/wifi issues, avoid care teams' });
  
-  if (['open heart','cabg','coronary bypass','valve replacement','valve repair','tavr','transcatheter aortic'].some(k => proc.includes(k))) {
+  if (['open heart','cabg','coronary bypass','valve replacement','valve repair','tavr','transcatheter aortic',
+       'mitraclip','mitra clip','mitral clip','transcatheter mitral'].some(k => proc.includes(k))) {
     isCardiac = true; acuity = 'cardiac';
-    flags.push({ level: 'critical', msg: 'Open Heart/TAVR — CV primary MDs only' });
+    flags.push({ level: 'critical', msg: 'Structural heart (Open Heart/TAVR/MitraClip) — CV primary MDs only' });
   }
- 
-  if (!isCardiac && ['watchman','tee','transesophageal','cardioversion'].some(k => proc.includes(k))) {
+
+  if (!isCardiac && proc.includes('watchman')) {
     isCathEP = true; acuity = 'cardiac';
+    flags.push({ level: 'warn', msg: 'Watchman — CV required; Munro preferred (complex TEE). Schedule for Munro days when possible.' });
+  }
+
+  if (!isCardiac && !proc.includes('watchman') && ['tee','transesophageal','cardioversion'].some(k => proc.includes(k))) {
+    isCathEP = true; acuity = 'cardiac';
+    flags.push({ level: 'info', msg: 'Cardiac-adjacent — CV covers by default; any MD can fill if CV is pulled.' });
   }
  
   if (['lobectomy','pneumonectomy','thoracotomy','vats','esophagectomy','thoracic'].some(k => proc.includes(k))) {
@@ -633,19 +643,31 @@ export function cardiacDecisionTree(rooms, cvCallMD, backupCVMD) {
   let cvCallOccupied = false, backupCVOccupied = false;
  
   // ── Tier classifier ──────────────────────────────────────────
-  // 1 = open heart / TAVR (highest priority — why we hired CV team)
-  // 2 = thoracic
-  // 3 = Watchman
-  // 4 = EP/ablation
-  // 5 = TEE/cardioversion
+  // Tier 1 — MANDATORY CV anesthesia: open heart, TAVR, MitraClip, Watchman.
+  //   These are why we have a CV team. CV Call takes the first Tier 1 case;
+  //   Backup CV takes a simultaneous second.
+  // Tier 2 — Thoracic: CV team preferred but can fall to thoracic-capable general MD.
+  // Tier 3 — Cardiac-adjacent (high): EP ablation, complex cath.
+  //   CV covers these when no Tier 1/2 work exists — keeps them productive.
+  //   If CV is pulled for an emergency, ANY anesthesiologist can fill.
+  //   Simple cases (TEE, cardioversion) can flex to care team with an anesthetist.
+  // Tier 4 — Cardiac-adjacent (low): TEE, cardioversion.
+  //   Same rules as Tier 3 — CV works these by default, but any MD (or care team)
+  //   can cover if CV is occupied.
   // 0 = doesn't match cardiac categories
   const getTier = proc => {
     const p = (proc || '').toLowerCase();
-    if (['open heart','cabg','bypass','valve replacement','valve repair','tavr','transcatheter aortic'].some(k => p.includes(k))) return 1;
+    // Tier 1 — MUST have CV anesthesia
+    if (['open heart','cabg','bypass','valve replacement','valve repair','tavr','transcatheter aortic',
+         'mitraclip','mitra clip','mitral clip','transcatheter mitral'].some(k => p.includes(k))) return 1;
+    // Watchman — Tier 1 (structural heart, complex TEE; Munro preferred)
+    if (p.includes('watchman')) return 1;
+    // Tier 2 — Thoracic
     if (['thoracic','lobectomy','pneumonectomy','thoracotomy','vats','esophagectomy'].some(k => p.includes(k))) return 2;
-    if (p.includes('watchman')) return 3;
-    if (['ep study','electrophysiology','ablation','afib','a fib','affera'].some(k => p.includes(k))) return 4;
-    if (['tee','transesophageal','cardioversion'].some(k => p.includes(k))) return 5;
+    // Tier 3 — Cardiac-adjacent (CV by preference, not requirement)
+    if (['ep study','electrophysiology','ablation','afib','a fib','affera'].some(k => p.includes(k))) return 3;
+    // Tier 4 — Cardiac-adjacent low (any MD can cover; care team possible)
+    if (['tee','transesophageal','cardioversion'].some(k => p.includes(k))) return 4;
     return 0;
   };
  
@@ -663,108 +685,105 @@ export function cardiacDecisionTree(rooms, cvCallMD, backupCVMD) {
     }
   }
  
-  // ── LAYER 1: Tier 1 & 2 (big cardiac cases CV team was hired for) ──
-  // Open heart, TAVR, thoracic. These claim CV MDs first.
+  // ── LAYER 1: Mandatory CV cases (Tier 1 + Tier 2) ───────────
+  // Open heart, TAVR, MitraClip, Watchman, thoracic.
+  // These are the cases the CV team exists for — they claim CV MDs first.
   const tier12Rooms = cardiacRooms
     .filter(r => r._topTier === 1 || r._topTier === 2)
     .sort((a, b) => a._topTier - b._topTier);   // Tier 1 before Tier 2
- 
+
   for (const room of tier12Rooms) {
-    const isWatchman = false;
     let assignedTo = null, note = '';
- 
+    const isWatchman = room.cases?.some(c => (c.procedure||'').toLowerCase().includes('watchman'));
+
     if (room._topTier === 1) {
-      if (!cvCallOccupied)        { assignedTo = cvCallMD;   cvCallOccupied = true;   note = 'CV Call — open heart/TAVR'; }
-      else if (!backupCVOccupied) { assignedTo = backupCVMD; backupCVOccupied = true; note = 'Backup CV — simultaneous open heart'; }
-      else                        { note = '⚠ Both CV occupied — use Pond or Dodwani'; }
+      // Watchman: Munro preferred (he does the complex TEE); falls back to any CV MD
+      if (isWatchman) {
+        const munro = [cvCallMD, backupCVMD].find(n => n === 'Munro, Jonathan');
+        if (munro && !cvCallOccupied && munro === cvCallMD)       { assignedTo = cvCallMD;   cvCallOccupied = true;   note = 'Munro — Watchman (preferred for complex TEE)'; }
+        else if (munro && !backupCVOccupied && munro === backupCVMD) { assignedTo = backupCVMD; backupCVOccupied = true; note = 'Munro — Watchman (preferred for complex TEE)'; }
+        else if (!cvCallOccupied)        { assignedTo = cvCallMD;   cvCallOccupied = true;   note = 'CV Call — Watchman (Munro not on today)'; }
+        else if (!backupCVOccupied)      { assignedTo = backupCVMD; backupCVOccupied = true; note = 'Backup CV — Watchman'; }
+        else                             { note = '⚠ Both CV occupied — Watchman needs any cardiac-capable MD (Pond, Dodwani)'; }
+      } else {
+        // Open heart / TAVR / MitraClip
+        if (!cvCallOccupied)        { assignedTo = cvCallMD;   cvCallOccupied = true;   note = 'CV Call — open heart/TAVR/MitraClip'; }
+        else if (!backupCVOccupied) { assignedTo = backupCVMD; backupCVOccupied = true; note = 'Backup CV — simultaneous structural heart case'; }
+        else                        { note = '⚠ Both CV occupied — use Pond or Dodwani for this case'; }
+      }
     } else {
       // Tier 2 — thoracic
       if (!cvCallOccupied)        { assignedTo = cvCallMD;   cvCallOccupied = true;   note = 'CV Call — thoracic'; }
       else if (!backupCVOccupied) { assignedTo = backupCVMD; backupCVOccupied = true; note = 'Backup CV — thoracic'; }
       else                        { note = 'CV team occupied — assign thoracic-capable general MD'; }
     }
- 
+
     if (assignedTo) room.assignedProvider = assignedTo;
     room.cardiacNote = note;
   }
- 
-  // ── LAYER 2: Remaining cath rooms, CV preference applies ─────
-  // Only runs if CV MDs weren't fully consumed by Layer 1.
-  // The rule: CV Call prefers the minors/phantom room (easier to extract
-  // for emergency open heart). Backup CV prefers EP/higher-acuity cath.
+
+  // ── LAYER 2: Cardiac-adjacent cath rooms ─────────────────────
+  // Tiers 3–4 (EP/ablation, TEE, cardioversion) and phantom Add-On rooms.
+  // CV covers these because they're here and it keeps them productive —
+  // these cases do NOT require CV anesthesia. If CV is pulled for an
+  // emergency Tier 1 case, any anesthesiologist can fill. Simple cases
+  // (TEE, cardioversion) can flex to a care team with an anesthetist.
   const remainingCathRooms = cardiacRooms
     .filter(r => !r.assignedProvider && (r.isCathEP || r._isMinors));
- 
-  // Split by type: "high" cath rooms (EP/Watchman/TEE — have real cases) vs
-  // "minors" (phantom Add-On or rooms with only low-acuity procedures).
-  const highCathRooms   = remainingCathRooms.filter(r => !r._isMinors && r._topTier >= 3 && r._topTier <= 5);
+
+  const highCathRooms   = remainingCathRooms.filter(r => !r._isMinors && r._topTier >= 3 && r._topTier <= 4);
   const minorsCathRooms = remainingCathRooms.filter(r => r._isMinors);
   const otherCathRooms  = remainingCathRooms.filter(r =>
     !highCathRooms.includes(r) && !minorsCathRooms.includes(r)
   );
- 
-  // Rule: if CV Call is still free AND there's a minors room, CV Call → minors.
-  // This frees Backup CV (also still free, if applicable) for the high cath room.
+
+  // CV Call → minors/phantom room (easiest to extract for emergency Tier 1 call)
   if (!cvCallOccupied && cvCallMD && minorsCathRooms.length > 0) {
     const minorsRoom = minorsCathRooms.shift();
     minorsRoom.assignedProvider = cvCallMD;
-    minorsRoom.cardiacNote      = 'CV Call — cath minors (easier to extract if emergency)';
+    minorsRoom.cardiacNote      = 'CV Call — cardiac-adjacent (cath minors); easy to pull for emergency open heart';
     cvCallOccupied = true;
   }
- 
-  // Assign Backup CV to highest-acuity remaining cath room first (Watchman > EP > TEE)
-  const tierPriority = [3, 4, 5];
+
+  // Backup CV → highest-acuity remaining cath room (EP > TEE)
+  const tierPriority = [3, 4];
   for (const tier of tierPriority) {
     if (backupCVOccupied) break;
     const room = highCathRooms.find(r => r._topTier === tier && !r.assignedProvider);
     if (!room || !backupCVMD) continue;
- 
-    // Special case: Munro on Watchman preferred (complex TEE)
-    if (tier === 3 && backupCVMD === 'Munro, Jonathan') {
-      room.assignedProvider = 'Munro, Jonathan';
-      room.cardiacNote      = 'Munro — Watchman (complex TEE)';
-    } else if (tier === 3) {
-      room.assignedProvider = backupCVMD;
-      room.cardiacNote      = 'Backup CV — Watchman';
-    } else if (tier === 4) {
-      room.assignedProvider = backupCVMD;
-      room.cardiacNote      = 'Backup CV — EP/ablation';
-    } else {
-      room.assignedProvider = backupCVMD;
-      room.cardiacNote      = 'Backup CV — TEE/cardioversion';
-    }
+    room.assignedProvider = backupCVMD;
+    room.cardiacNote      = tier === 3
+      ? 'Backup CV — cardiac-adjacent (EP/ablation); any MD can cover if CV is pulled'
+      : 'Backup CV — cardiac-adjacent (TEE/cardioversion); any MD or care team can cover if CV is pulled';
     backupCVOccupied = true;
   }
- 
-  // If CV Call is still free (no Layer 1 work, no minors room to claim),
-  // place them on the highest-acuity remaining cath room.
+
+  // If CV Call is still free, place on highest-acuity remaining cath room
   if (!cvCallOccupied && cvCallMD) {
     for (const tier of tierPriority) {
       const room = highCathRooms.find(r => r._topTier === tier && !r.assignedProvider);
       if (!room) continue;
       room.assignedProvider = cvCallMD;
-      room.cardiacNote      = tier === 3 ? 'CV Call — Watchman'
-                            : tier === 4 ? 'CV Call — EP'
-                            : 'CV Call — TEE';
+      room.cardiacNote      = tier === 3
+        ? 'CV Call — cardiac-adjacent (EP/ablation); any MD can cover if CV is pulled'
+        : 'CV Call — cardiac-adjacent (TEE/cardioversion); any MD or care team can cover if CV is pulled';
       cvCallOccupied = true;
       break;
     }
   }
- 
-  // If Backup CV is still free (no Layer 1 work, no high cath room), place on minors.
+
+  // Backup CV → minors if still free
   if (!backupCVOccupied && backupCVMD && minorsCathRooms.length > 0) {
     const minorsRoom = minorsCathRooms.shift();
     minorsRoom.assignedProvider = backupCVMD;
-    minorsRoom.cardiacNote      = 'Backup CV — cath minors';
+    minorsRoom.cardiacNote      = 'Backup CV — cardiac-adjacent (cath minors); easy to pull for emergency';
     backupCVOccupied = true;
   }
- 
-  // Any remaining cath rooms (highCathRooms, minorsCathRooms, otherCathRooms)
-  // without an assignedProvider flow to standard general fill in buildAssignments/buildCareTeams.
-  // We annotate them so downstream logic knows they're cath-adjacent.
+
+  // Remaining rooms flow to general fill in buildAssignments/buildCareTeams
   for (const room of remainingCathRooms) {
     if (!room.assignedProvider && !room.cardiacNote) {
-      room.cardiacNote = 'Cath room — general fill (CV team occupied or unavailable)';
+      room.cardiacNote = 'Cardiac-adjacent — general fill (CV team occupied or unavailable); any MD can cover';
     }
   }
  
