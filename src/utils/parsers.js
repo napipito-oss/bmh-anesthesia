@@ -86,12 +86,22 @@ function needsAnesthesia(procedure, surgeon, room) {
   if (rm.includes('endo bs') || rm.includes('endobs'))
     return { needs: false, reason: 'Endo BS room — no anesthesia' };
  
+  // Cardiac cath procedures — all performed under RN-administered conscious sedation.
+  // PCI (percutaneous coronary intervention), PTCA, coronary stenting, and diagnostic
+  // heart caths do NOT need anesthesia unless a specific note requests it.
+  const isPCI = /\bpci\b/.test(proc) ||
+    proc.includes('percutaneous coronary') ||
+    proc.includes('coronary intervention') ||
+    proc.includes('coronary angioplasty') ||
+    proc.includes('coronary stent') ||
+    proc.includes('ptca') ||
+    proc.includes('balloon angioplasty');
   if (
     (proc.includes('left heart cath') || proc.includes('right heart cath') ||
-     proc.includes('heart cath') || proc.includes('cardiac catheterization')) &&
+     proc.includes('heart cath') || proc.includes('cardiac catheterization') || isPCI) &&
     !proc.includes('tee') && !proc.includes('transesophageal')
   )
-    return { needs: false, reason: 'Heart cath — no anesthesia' };
+    return { needs: false, reason: 'Heart cath/PCI — no anesthesia (RN-administered sedation)' };
  
   if (proc.includes('loop recorder'))
     return { needs: false, reason: 'Loop recorder — no anesthesia (all surgeons)' };
