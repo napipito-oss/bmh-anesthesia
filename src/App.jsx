@@ -184,8 +184,8 @@ Return this exact structure:
 }
 
 // ── CONFIDENCE COLORS ─────────────────────────────────────────
-const CONF_COLORS = { high: '#22c55e', medium: '#f59e0b', low: '#ef4444' };
-const CONF_BG     = { high: '#0f2a1e', medium: '#2a1f00', low: '#2a0a0a' };
+const CONF_COLORS = { high: '#16a34a', medium: '#b45309', low: '#dc2626' };
+const CONF_BG     = { high: '#f0fdf4', medium: '#fffbeb', low: '#fef2f2' };
 
 export default function App() {
   const [tab, setTab] = useState('board');
@@ -615,8 +615,8 @@ export default function App() {
               {resourceLoaded && (
                 <div style={{marginTop:'12px'}}>
                   {coverageGaps.length === 0 ? (
-                    <div style={{background:'#0f2a1e',border:'1px solid #22c55e',borderRadius:'var(--radius)',padding:'10px 12px'}}>
-                      <div style={{fontSize:'10px',color:'#4ade80',letterSpacing:'1px'}}>✓ COVERAGE COMPLETE</div>
+                    <div style={{background:'#f0fdf4',border:'1.5px solid #16a34a',borderRadius:'var(--radius)',padding:'10px 12px'}}>
+                      <div style={{fontSize:'11px',color:'#15803d',letterSpacing:'1px',fontWeight:'700'}}>✓ COVERAGE COMPLETE</div>
                       <div style={{fontSize:'11px',color:'var(--text-secondary)',marginTop:'3px'}}>Coverage structure confirmed. Cube data will populate room assignments.</div>
                     </div>
                   ) : (
@@ -662,8 +662,8 @@ export default function App() {
                 <div style={{marginTop:'14px'}}>
                   <div className="section-label">WORKING TODAY</div>
                   {qg.aaBackupCall && (
-                    <div style={{background:'#2a1a00',border:'1px solid #f59e0b',borderRadius:'var(--radius)',padding:'10px 12px',marginBottom:'10px'}}>
-                      <div style={{fontSize:'10px',color:'#fbbf24',fontWeight:'600',letterSpacing:'1px',marginBottom:'4px'}}>⚠ AA BACKUP CALL DAY</div>
+                    <div style={{background:'#fffbeb',border:'1.5px solid #d97706',borderRadius:'var(--radius)',padding:'10px 12px',marginBottom:'10px'}}>
+                      <div style={{fontSize:'11px',color:'#92400e',fontWeight:'700',letterSpacing:'1px',marginBottom:'4px'}}>⚠ AA BACKUP CALL DAY</div>
                       <div style={{fontSize:'11px',color:'var(--text-secondary)'}}>No physician on backup call. {qg.BackUpCallAAs.join(' + ')} are covering the backup call role as anesthetists today.</div>
                       <div style={{fontSize:'10px',color:'var(--text-muted)',marginTop:'4px'}}>After 9pm: if OR Call is occupied and an emergency comes in, both AAs are called in and OR Call converts to 1:2 medical direction.</div>
                     </div>
@@ -819,7 +819,7 @@ export default function App() {
                     if (unusedAnests.length === 0) return null;
                     return (
                       <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'8px 12px',minWidth:'160px'}}>
-                        <div style={{fontSize:'10px',color:'#ec4899',fontWeight:'600',letterSpacing:'1px',marginBottom:'5px'}}>AVAILABLE ANESTHETISTS</div>
+                        <div style={{fontSize:'11px',color:'#be185d',fontWeight:'700',letterSpacing:'1px',marginBottom:'5px'}}>AVAILABLE ANESTHETISTS</div>
                         {unusedAnests.map(a => <div key={a.name} style={{fontSize:'11px',color:'var(--text-secondary)',marginBottom:'2px'}}>{a.name.split(',')[0]}</div>)}
                       </div>
                     );
@@ -828,7 +828,7 @@ export default function App() {
               </div>
             )}
             {orCallWarning && (
-              <div style={{background:'#2a0f00',border:'1px solid #f97316',borderRadius:'var(--radius)',padding:'10px 14px',marginBottom:'12px',fontSize:'11px',color:'#fb923c',lineHeight:'1.6'}}>
+              <div style={{background:'#fff7ed',border:'1.5px solid #ea580c',borderRadius:'var(--radius)',padding:'10px 14px',marginBottom:'12px',fontSize:'12px',color:'#9a3412',lineHeight:'1.6',fontWeight:'600'}}>
                 {orCallWarning}
               </div>
             )}
@@ -867,13 +867,13 @@ export default function App() {
                   <div key={room.room} className="card room-card" draggable
                     onDragStart={e => handleDragStart(e, room.room)} onDragOver={e => handleDragOver(e, room.room)}
                     onDragLeave={handleDragLeave} onDrop={e => handleDrop(e, room.room)} onDragEnd={handleDragEnd}
-                    style={{borderLeft:`3px solid ${pairedWith?'#06b6d4':ctColor?ctColor.border:ac}`,borderColor:isDragOver?'#06b6d4':conflict?'#ef4444':pairedWith?'#06b6d4':ctColor?ctColor.border:'var(--border)',background:isDragOver?'#0a1f2a':isDragging?'var(--bg-elevated)':ctColor?ctColor.bg:'var(--bg-surface)',outline:isDragOver?'2px dashed #06b6d4':'none',opacity:isDragging?0.6:1,cursor:'grab',transition:'border-color 0.15s, background 0.15s, outline 0.15s'}}
+                    style={{borderLeft:`3px solid ${pairedWith?'#06b6d4':ctColor?ctColor.border:ac}`,borderColor:isDragOver?'#06b6d4':conflict?'#ef4444':pairedWith?'#06b6d4':ctColor?ctColor.border:'var(--border)',background:isDragOver?'#dbeafe':isDragging?'var(--bg-elevated)':ctColor?ctColor.bg:'var(--bg-surface)',outline:isDragOver?'2px dashed #06b6d4':'none',opacity:isDragging?0.6:1,cursor:'grab',transition:'border-color 0.15s, background 0.15s, outline 0.15s'}}
                     onClick={() => setExpanded(isExp ? null : `room-${room.room}`)}>
                     {pairedWith && (
                       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'5px'}}>
-                        <div style={{display:'inline-flex',alignItems:'center',gap:'5px',background:'#0c2030',border:'1px solid #06b6d4',borderRadius:'var(--radius-sm)',padding:'2px 7px'}}>
-                          <span style={{fontSize:'9px',color:'#06b6d4',fontWeight:'700',letterSpacing:'1px'}}>⇄ PAIRED</span>
-                          <span style={{fontSize:'9px',color:'#67e8f9'}}>→ {pairedWith}</span>
+                        <div style={{display:'inline-flex',alignItems:'center',gap:'5px',background:'#ecfeff',border:'1.5px solid #0891b2',borderRadius:'var(--radius-sm)',padding:'2px 7px'}}>
+                          <span style={{fontSize:'10px',color:'#0e7490',fontWeight:'700',letterSpacing:'1px'}}>⇄ PAIRED</span>
+                          <span style={{fontSize:'10px',color:'#0e7490'}}>→ {pairedWith}</span>
                         </div>
                         <button onClick={e=>{e.stopPropagation();breakPair(room.room);}} style={{background:'transparent',border:'none',color:'#475569',cursor:'pointer',fontSize:'12px',padding:'0 2px',lineHeight:1}} title="Break pair">✕</button>
                       </div>
@@ -1024,7 +1024,7 @@ export default function App() {
             <div className="section-label">SURGEON BLOCK DATABASE</div>
             <input className="search-input" value={surgSearch} onChange={e=>setSurgSearch(e.target.value)} placeholder="Search surgeons or specialty..." />
             <div className="legend">
-              <span style={{color:'#ef4444'}}>■</span> Always &nbsp;<span style={{color:'#f97316'}}>■</span> Usually &nbsp;<span style={{color:'#60a5fa'}}>■</span> Specific cases &nbsp;<span style={{color:'#eab308'}}>■</span> Confirm day-of &nbsp;<span style={{color:'#22c55e'}}>■</span> Never &nbsp;<span style={{color:'#94a3b8'}}>■</span> If offered/appropriate
+              <span style={{color:'#dc2626'}}>■</span> Always &nbsp;<span style={{color:'#ea580c'}}>■</span> Usually &nbsp;<span style={{color:'#1d4ed8'}}>■</span> Specific cases &nbsp;<span style={{color:'#b45309'}}>■</span> Confirm day-of &nbsp;<span style={{color:'#16a34a'}}>■</span> Never &nbsp;<span style={{color:'#64748b'}}>■</span> If offered/appropriate
             </div>
             <div className="provider-grid">
               {Object.entries(SURGEON_BLOCKS).filter(([n,p])=>!surgSearch||n.toLowerCase().includes(surgSearch.toLowerCase())||(p.specialty||'').toLowerCase().includes(surgSearch.toLowerCase())).map(([name,p]) => {
@@ -1062,7 +1062,7 @@ export default function App() {
           <div>
             <div style={{display:'flex',alignItems:'baseline',gap:'12px',marginBottom:'4px'}}>
               <div className="section-label" style={{margin:0}}>IMPORT HISTORY — DAY SHEET UPLOAD</div>
-              {importedDays.length > 0 && <span style={{fontSize:'10px',color:'#a78bfa',letterSpacing:'1px'}}>{importedDays.length} RECORDS STORED</span>}
+              {importedDays.length > 0 && <span style={{fontSize:'11px',color:'#6d28d9',letterSpacing:'1px',fontWeight:'700'}}>{importedDays.length} RECORDS STORED</span>}
             </div>
             <div className="card-hint" style={{marginBottom:'20px'}}>
               Upload scanned day sheets to build a historical training dataset. Claude vision reads the handwritten grid and extracts assignments.
@@ -1094,7 +1094,7 @@ export default function App() {
                     style={{display:'block',width:'100%',fontSize:'11px',color:'var(--text-secondary)',fontFamily:'var(--font-mono)',cursor:'pointer'}}
                   />
                   {importImageUrl && (
-                    <div style={{marginTop:'10px',border:'1px solid var(--border)',borderRadius:'var(--radius)',overflow:'hidden',background:'#0a0a0a'}}>
+                    <div style={{marginTop:'10px',border:'1px solid var(--border)',borderRadius:'var(--radius)',overflow:'hidden',background:'#f8fafc'}}>
                       <img src={importImageUrl} alt="Day sheet preview"
                         style={{width:'100%',display:'block',maxHeight:'280px',objectFit:'contain'}} />
                     </div>
@@ -1141,9 +1141,9 @@ export default function App() {
                 )}
 
                 {importSaved && !importResult && (
-                  <div style={{background:'#0f2a1e',border:'1px solid #22c55e',borderRadius:'var(--radius)',padding:'14px 16px',marginTop:'8px'}}>
-                    <div style={{fontSize:'11px',color:'#4ade80',fontWeight:'600',letterSpacing:'1px',marginBottom:'4px'}}>✓ SAVED TO DATABASE</div>
-                    <div style={{fontSize:'10px',color:'var(--text-secondary)'}}>Ready for the next upload. The record appears below in the history list.</div>
+                  <div style={{background:'#f0fdf4',border:'1.5px solid #16a34a',borderRadius:'var(--radius)',padding:'14px 16px',marginTop:'8px'}}>
+                    <div style={{fontSize:'12px',color:'#15803d',fontWeight:'700',letterSpacing:'1px',marginBottom:'4px'}}>✓ SAVED TO DATABASE</div>
+                    <div style={{fontSize:'11px',color:'var(--text-secondary)'}}>Ready for the next upload. The record appears below in the history list.</div>
                   </div>
                 )}
 
@@ -1185,8 +1185,8 @@ export default function App() {
                           {(importResult.assignments || []).map((a, i) => (
                             <tr key={i} style={{borderBottom:'1px solid var(--border)',background:i%2===0?'var(--bg-surface)':'var(--bg-base)'}}>
                               <td style={{padding:'5px 10px',color:'var(--text-primary)',fontWeight:'500'}}>{a.room}</td>
-                              <td style={{padding:'5px 10px',color:'#60a5fa'}}>{a.md || '—'}</td>
-                              <td style={{padding:'5px 10px',color:'#f9a8d4'}}>{a.anesthetist || '—'}</td>
+                              <td style={{padding:'5px 10px',color:'#1d4ed8',fontWeight:'600'}}>{a.md || '—'}</td>
+                              <td style={{padding:'5px 10px',color:'#be185d',fontWeight:'600'}}>{a.anesthetist || '—'}</td>
                               <td style={{padding:'5px 10px',color:'var(--text-muted)'}}>
                                 {a.callRole || (a.careTeam ? 'Care Team' : '—')}
                               </td>
@@ -1212,7 +1212,7 @@ export default function App() {
                     )}
 
                     {importSaved ? (
-                      <div style={{background:'#0f2a1e',border:'1px solid #22c55e',borderRadius:'var(--radius)',padding:'10px 14px',color:'#4ade80',fontSize:'11px',letterSpacing:'1px'}}>
+                      <div style={{background:'#f0fdf4',border:'1.5px solid #16a34a',borderRadius:'var(--radius)',padding:'10px 14px',color:'#15803d',fontSize:'12px',letterSpacing:'1px',fontWeight:'700'}}>
                         ✓ SAVED — visible in the history list below
                       </div>
                     ) : (
@@ -1271,8 +1271,8 @@ export default function App() {
                             {day.assignments?.map((a, i) => (
                               <div key={i} style={{display:'grid',gridTemplateColumns:'55px 1fr 1fr',gap:'6px',fontSize:'10px',fontFamily:'var(--font-mono)',marginBottom:'4px',alignItems:'baseline'}}>
                                 <span style={{color:'var(--text-muted)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.room}</span>
-                                <span style={{color:'#60a5fa',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.md || '—'}</span>
-                                <span style={{color:'#f9a8d4',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.anesthetist || '—'}</span>
+                                <span style={{color:'#1d4ed8',fontWeight:'600',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.md || '—'}</span>
+                                <span style={{color:'#be185d',fontWeight:'600',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.anesthetist || '—'}</span>
                               </div>
                             ))}
                             {day.staffingNotes && (

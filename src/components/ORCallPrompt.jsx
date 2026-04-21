@@ -19,8 +19,8 @@ const S = {
   btnRow: { display:'flex', gap:'8px', marginTop:'4px' },
   btnPrimary: { flex:1, background:'linear-gradient(135deg,#1d4ed8,#7c3aed)', color:'white', border:'none', borderRadius:'var(--radius)', padding:'10px', fontSize:'11px', letterSpacing:'2px', fontFamily:'var(--font-mono)', cursor:'pointer' },
   btnSecondary: { background:'var(--bg-surface)', color:'var(--text-secondary)', border:'1px solid var(--border)', borderRadius:'var(--radius)', padding:'10px 16px', fontSize:'11px', fontFamily:'var(--font-mono)', cursor:'pointer' },
-  predicted: { background:'#0f2a1e', border:'1px solid #22c55e', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:'14px' },
-  history: { background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:'var(--radius)', padding:'8px 12px', marginBottom:'14px', fontSize:'10px', color:'var(--text-muted)' },
+  predicted: { background:'#f0fdf4', border:'1.5px solid #16a34a', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:'14px' },
+  history: { background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:'var(--radius)', padding:'8px 12px', marginBottom:'14px', fontSize:'11px', color:'var(--text-muted)' },
 };
 
 export default function ORCallPrompt({ orCallProvider, rooms, anesthetistCount = 0, workingMDCount = 0, onConfirm, onSkip }) {
@@ -131,7 +131,7 @@ export default function ORCallPrompt({ orCallProvider, rooms, anesthetistCount =
         {/* Prediction banner */}
         {prediction?.predicted && (
           <div style={S.predicted}>
-            <div style={{fontSize:'9px',color:'#4ade80',letterSpacing:'2px',marginBottom:'3px'}}>
+            <div style={{fontSize:'11px',color:'#15803d',fontWeight:'700',letterSpacing:'1px',marginBottom:'3px'}}>
               PREDICTED PREFERENCE ({Math.round(prediction.confidence * 100)}% confidence, {prediction.callCount} prior calls)
             </div>
             <div style={{fontSize:'11px',color:'var(--text-primary)'}}>
@@ -167,7 +167,7 @@ export default function ORCallPrompt({ orCallProvider, rooms, anesthetistCount =
         </select>
 
         {warning && (
-          <div style={{background:'#2a0a0a',border:'1px solid #ef4444',borderRadius:'var(--radius)',padding:'8px 12px',marginBottom:'10px',fontSize:'10px',color:'#f87171',lineHeight:'1.5'}}>
+          <div style={{background:'#fef2f2',border:'1.5px solid #dc2626',borderRadius:'var(--radius)',padding:'8px 12px',marginBottom:'10px',fontSize:'12px',color:'#991b1b',lineHeight:'1.5',fontWeight:'600'}}>
             ⚠ {warning}
           </div>
         )}

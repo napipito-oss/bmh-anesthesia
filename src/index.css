@@ -1,32 +1,31 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  /* Backgrounds — medium-dark navy instead of near-black */
-  --bg-base:     #0f172a;
-  --bg-surface:  #1a2436;
-  --bg-elevated: #1e2e44;
-  --bg-hover:    #253450;
+  /* Light theme — white/gray backgrounds, dark text, maximum contrast for bright OR */
+  --bg-base:     #ffffff;
+  --bg-surface:  #f8fafc;
+  --bg-elevated: #f1f5f9;
+  --bg-hover:    #e2e8f0;
 
-  /* Borders — clearly visible on dark bg */
-  --border:        #2d4d70;
-  --border-bright: #4a74a8;
+  --border:        #cbd5e1;
+  --border-bright: #94a3b8;
 
-  /* Text — high contrast for bright OR environment */
-  --text-primary:   #f0f6ff;
-  --text-secondary: #a8c0d6;
-  --text-muted:     #6e90aa;
-  --text-faint:     #4a6880;
+  /* Dark text on light background — very high contrast */
+  --text-primary:   #0f172a;
+  --text-secondary: #334155;
+  --text-muted:     #64748b;
+  --text-faint:     #94a3b8;
 
-  /* Accents — unchanged */
-  --accent-blue:     #3b82f6;
-  --accent-blue-dim: #1d4ed8;
-  --accent-teal:     #14b8a6;
-  --accent-purple:   #8b5cf6;
-  --accent-pink:     #ec4899;
-  --accent-green:    #22c55e;
-  --accent-amber:    #f59e0b;
-  --accent-orange:   #f97316;
-  --accent-red:      #ef4444;
+  /* Accents — darkened for light background readability */
+  --accent-blue:     #1d4ed8;
+  --accent-blue-dim: #1e40af;
+  --accent-teal:     #0f766e;
+  --accent-purple:   #6d28d9;
+  --accent-pink:     #be185d;
+  --accent-green:    #16a34a;
+  --accent-amber:    #b45309;
+  --accent-orange:   #c2410c;
+  --accent-red:      #dc2626;
 
   --font-mono: 'IBM Plex Mono', monospace;
   --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
@@ -40,21 +39,20 @@ html, body, #root {
   height: 100%;
   background: var(--bg-base);
   color: var(--text-primary);
-  font-family: var(--font-sans);   /* proportional font — much more readable */
-  font-size: 14px;                 /* up from 13px */
+  font-family: var(--font-sans);
+  font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
 ::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: var(--bg-base); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
+::-webkit-scrollbar-track { background: var(--bg-elevated); }
+::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #64748b; }
 
-/* Buttons and form controls use sans except textareas (data entry stays mono) */
 button   { cursor: pointer; font-family: var(--font-sans); }
-select   { font-family: var(--font-sans); }
-textarea { font-family: var(--font-mono); }  /* keep mono for tab-delimited data */
+select   { font-family: var(--font-sans); color: var(--text-primary); }
+textarea { font-family: var(--font-mono); }
 input    { font-family: var(--font-sans); }
 
-::selection { background: rgba(59,130,246,0.3); }
+::selection { background: rgba(29,78,216,0.2); }
