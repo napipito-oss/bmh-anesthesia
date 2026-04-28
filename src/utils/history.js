@@ -145,3 +145,102 @@ export function deleteHistoryDate(date) {
     return true;
   } catch { return false; }
 }
+
+// ── Schedule comparison storage (CC vs Coordinator) ──────────────
+// CC schedule = what the command center built (saved from Assignments tab)
+// Coord schedule = what Jenni assigned (imported from day sheet image)
+const CC_SCHED_KEY   = 'bmh_cc_schedule';
+const COORD_SCHED_KEY = 'bmh_coord_schedule';
+
+function loadCCSchedules() {
+  try { return JSON.parse(localStorage.getItem(CC_SCHED_KEY) || '{}'); }
+  catch { return {}; }
+}
+function loadCoordSchedules() {
+  try { return JSON.parse(localStorage.getItem(COORD_SCHED_KEY) || '{}'); }
+  catch { return {}; }
+}
+
+export function saveCCSchedule(date, rooms) {
+  if (!date) return false;
+  try {
+    const all = loadCCSchedules();
+    all[date] = {
+      savedAt: new Date().toISOString(),
+      rooms: rooms
+        .filter(r => r.assignedProvider || r.anesthetist)
+        .map(r => ({
+          room:           r.room,
+          md:             r.assignedProvider || null,
+          anesthetist:    r.anesthetist || null,
+          isCareTeam:     r.isCareTeam || false,
+          careTeamRatio:  r.careTeamRatio || null,
+          isEndo:         r.isEndo || false,
+          isBOOS:         r.isBOOS || false,
+          isCathEP:       r.isCathEP || false,
+          isIR:           r.isIR || false,
+          isCardiac:      r.isCardiac || false,
+          blockRequired:  r.blockRequired || false,
+          acuity:         r.acuity || 'routine',
+          surgeons:       r.surgeons || [],
+        })),
+    };
+    localStorage.setItem(CC_SCHED_KEY, JSON.stringify(all));
+    return true;
+  } catch { return false; }
+}
+
+export function getCCSchedule(date) {
+  return loadCCSchedules()[date] || null;
+}
+
+export function deleteCCSchedule(date) {
+  try {
+    const all = loadCCSchedules();
+    delete all[date];
+    localStorage.setItem(CC_SCHED_KEY, JSON.stringify(all));
+    return true;
+  } catch { return false; }
+}
+
+export function saveCoordSchedule(date, assignments, meta = {}) {
+  if (!date) return false;
+  try {
+    const all = loadCoordSchedules();
+    all[date] = {
+      savedAt:          new Date().toISOString(),
+      confidence:       meta.confidence || 'medium',
+      readabilityNotes: meta.readabilityNotes || null,
+      staffingNotes:    meta.staffingNotes || null,
+      assignments: assignments.map(a => ({
+        room:       a.room || '',
+        md:         a.md || null,
+        anesthetist: a.anesthetist || null,
+        careTeam:   a.careTeam || false,
+        callRole:   a.callRole || null,
+        notes:      a.notes || null,
+      })),
+    };
+    localStorage.setItem(COORD_SCHED_KEY, JSON.stringify(all));
+    return true;
+  } catch { return false; }
+}
+
+export function getCoordSchedule(date) {
+  return loadCoordSchedules()[date] || null;
+}
+
+export function deleteCoordSchedule(date) {
+  try {
+    const all = loadCoordSchedules();
+    delete all[date];
+    localStorage.setItem(COORD_SCHED_KEY, JSON.stringify(all));
+    return true;
+  } catch { return false; }
+}
+
+export function getScheduleDates() {
+  const cc    = Object.keys(loadCCSchedules());
+  const coord = Object.keys(loadCoordSchedules());
+  return [...new Set([...cc, ...coord])].sort().reverse();
+}

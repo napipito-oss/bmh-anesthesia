@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────
-// CARE TEAM ENGINE — v3.4
+// CARE TEAM ENGINE — v3.7
 // v3.2:
 //   - unassignedRooms excludes isORCallChoice rooms
 //   - globalUsed includes OR Call choice provider
@@ -25,6 +25,18 @@
 //   - Endo MD fallback: if Brand is off/PTO, the next available MD in
 //     priority order covers endo. Without this, endo rooms and phantom
 //     Endo Add-On rooms were skipped entirely when Brand wasn't working.
+// v3.7 (priority ordering fixes):
+//   - Removed ctMDs global sort by REGIONAL_CAPABLE. That sort moved
+//     block-capable MDs (e.g. Pipito rank #5) ahead of higher-priority
+//     non-block MDs (e.g. Kuraganti Backup Call #2), breaking locums →
+//     backup call → ranked priority order.
+//   - Non-block-capable MDs now skip block rooms in their orderedPool
+//     when >=2 non-block rooms are available. Block rooms wait for a
+//     block-capable MD — no global sort needed.
+//   - Removed endo pre-assignment from buildAssignments (parsers.js):
+//     pre-assigning Brand put him in globalUsed before Care Team A ran,
+//     causing the endo fallback to grab the first available locum (e.g.
+//     Lambert), draining him before Triplet's block rooms were assigned.
 // ─────────────────────────────────────────────────────────────
 import { classifyRoom } from './parsers.js';
  
@@ -55,17 +67,22 @@ export const CARE_TEAM_AVOID     = ['Eskew, Gregory S', 'Shepherd'];
 export const CARE_TEAM_RELUCTANT = ['DeWitt, Bracken J'];
  
 export const CARE_TEAM_TABLE = {
-  0:  { careTeamRooms: 0, mdsNeeded: 0, ratios: [],        floats: 0 },
-  1:  { careTeamRooms: 1, mdsNeeded: 1, ratios: [1],       floats: 0 },
-  2:  { careTeamRooms: 2, mdsNeeded: 1, ratios: [2],       floats: 0 },
-  3:  { careTeamRooms: 3, mdsNeeded: 1, ratios: [3],       floats: 0 },
-  4:  { careTeamRooms: 3, mdsNeeded: 1, ratios: [3],       floats: 1 },
-  5:  { careTeamRooms: 5, mdsNeeded: 2, ratios: [2, 3],    floats: 0 },
-  6:  { careTeamRooms: 6, mdsNeeded: 2, ratios: [3, 3],    floats: 0 },
-  7:  { careTeamRooms: 6, mdsNeeded: 2, ratios: [3, 3],    floats: 1 },
-  8:  { careTeamRooms: 8, mdsNeeded: 3, ratios: [3, 3, 2], floats: 0 },
-  9:  { careTeamRooms: 9, mdsNeeded: 3, ratios: [3, 3, 3], floats: 0 },
-  10: { careTeamRooms: 9, mdsNeeded: 3, ratios: [3, 3, 3], floats: 1 },
+  0:  { careTeamRooms: 0,  mdsNeeded: 0, ratios: [],              floats: 0 },
+  1:  { careTeamRooms: 1,  mdsNeeded: 1, ratios: [1],             floats: 0 },
+  2:  { careTeamRooms: 2,  mdsNeeded: 1, ratios: [2],             floats: 0 },
+  3:  { careTeamRooms: 3,  mdsNeeded: 1, ratios: [3],             floats: 0 },
+  4:  { careTeamRooms: 3,  mdsNeeded: 1, ratios: [3],             floats: 1 },
+  5:  { careTeamRooms: 5,  mdsNeeded: 2, ratios: [2, 3],          floats: 0 },
+  6:  { careTeamRooms: 6,  mdsNeeded: 2, ratios: [3, 3],          floats: 0 },
+  7:  { careTeamRooms: 6,  mdsNeeded: 2, ratios: [3, 3],          floats: 1 },
+  8:  { careTeamRooms: 8,  mdsNeeded: 3, ratios: [3, 3, 2],       floats: 0 },
+  9:  { careTeamRooms: 9,  mdsNeeded: 3, ratios: [3, 3, 3],       floats: 0 },
+  // 10: 3 teams of 3, 1 float
+  10: { careTeamRooms: 9,  mdsNeeded: 3, ratios: [3, 3, 3],       floats: 1 },
+  // 11: 3 teams of 3, 2 floats preferred (1:3,1:3,1:3,1:2 acceptable if rooms allow)
+  11: { careTeamRooms: 9,  mdsNeeded: 3, ratios: [3, 3, 3],       floats: 2 },
+  // 12: 4 teams (3,3,2,2) with 2 floats preferred; 4×1:3 possible but unlikely given room count
+  12: { careTeamRooms: 10, mdsNeeded: 4, ratios: [3, 3, 2, 2],    floats: 2 },
 };
  
 export function getCareTeamConfig(anesthetistCount) {
@@ -287,16 +304,6 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   let ctIdx    = 1;
   let roomPool = [...scoredMain.filter(r => roomCareTeamSuitability(r) !== 'avoid')];
 
-  // When block rooms are in the pool, sort block-capable MDs (Nielson, Lambert, etc.)
-  // to the front of ctMDs so they claim the block/jump cases before others.
-  // This is a stable sort within the existing priority ordering.
-  if (roomPool.some(r => r.blockRequired)) {
-    ctMDs.sort((a, b) => {
-      const aB = REGIONAL_CAPABLE.includes(a.name) ? 0 : 1;
-      const bB = REGIONAL_CAPABLE.includes(b.name) ? 0 : 1;
-      return aB - bB;
-    });
-  }
 
   // Greedy loop: keep forming care teams until AAs (<2 left), eligible MDs,
   // or rooms run out. Target 1:3 for comfortable MDs, 1:2 for reluctant/OR Call. Never 1:1.
@@ -334,6 +341,13 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
       orderedPool = roomPool;
     }
 
+    // Non-block-capable MDs route around block rooms when >=2 non-block rooms exist.
+    // This keeps block rooms available for block-capable MDs without disrupting
+    // priority ordering (locums → backup call → ranked MDs).
+    if (!isBlockCapable) {
+      const nonBlock = orderedPool.filter(r => !r.blockRequired);
+      if (nonBlock.length >= 2) orderedPool = nonBlock;
+    }
     const ctRooms = pickStaggeredRooms(orderedPool, actualRatio);
     if (ctRooms.length < 2) break;
 

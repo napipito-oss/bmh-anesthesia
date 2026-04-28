@@ -873,12 +873,11 @@ export function buildAssignments(rooms, qg, orCallChoice) {
   // care team. Pre-assigning here was consuming those locums before care team
   // formation, locking them out of the AA pool and leaving AAs stranded as floats.
  
-  // Endo — Brand always
-  for (const room of result) {
-    if (room.assignedProvider || !room.isEndo) continue;
-    const brand = allMDs.find(p => p.name === 'Brand, David L' && !used.has(p.name));
-    if (brand) { room.assignedProvider = brand.name; used.add(brand.name); }
-  }
+  // Endo — handled entirely in buildCareTeams (Care Team A: Brand → Endo).
+  // Pre-assigning Brand here marks him used and removes endo rooms from
+  // unassignedRooms before buildCareTeams runs, causing the Care Team A
+  // fallback to grab the first available locum (e.g. Lambert) as endoMD —
+  // which then drains that locum before block/care-team formation.
  
   // Peds — DeWitt first (employed, peds-capable), then locums capable of peds, then Pipito
   // Pipito is backup call (#2) so locums should be exhausted before pulling him for peds

@@ -1,539 +1,439 @@
 import { useState, useEffect, useRef } from 'react';
-import { ANESTHETIST_ROSTER } from '../data/providers.js';
 import {
-  LOCATION_TYPES, MD_ASSIGNMENT_TYPES,
-  loadHistory, saveFullDayHistory, getAllDates,
-  getHistoryForDate, deleteHistoryDate, getAnesthetistLocationCounts,
+  LOCATION_TYPES,
+  getAnesthetistLocationCounts,
+  getCCSchedule, deleteCCSchedule,
+  getCoordSchedule, saveCoordSchedule, deleteCoordSchedule,
+  getScheduleDates,
 } from '../utils/history.js';
 
-const MDS = [
-  'Eskew, Gregory S','DeWitt, Bracken J','Wu, Jennifer','Kuraganti, Manjusha',
-  'Singh, Karampal','Raghove, Vikas','Raghove, Punam','Pipito, Nicholas A',
-  'Brand, David L','Kane, Paul','Munro, Jonathan','Thomas, Michael',
-  'Gathings, Vincent','Lambert','Siddiqui','Nielson, Mark',
-  'Pond, William','Dodwani','Powell, Jason','Fraley','Shepherd',
-];
-
-const ROOMS = [
-  'BMH OR 01','BMH OR 02','BMH OR 03','BMH OR 04','BMH OR 05',
-  'BMH OR 06','BMH OR 07','BMH OR 08','BMH OR 09','BMH OR 10',
-  'BMH Endo 01','BMH Endo 02','BMH Endo 03',
-  'BMH CL 2','BMH CL 3','BMH CL Minor 2',
-  'BOOS OR 01','BOOS OR 02',
-];
+const CONF_COLOR = { high: '#16a34a', medium: '#b45309', low: '#dc2626' };
+const CONF_BG    = { high: '#f0fdf4', medium: '#fffbeb', low: '#fef2f2' };
 
 const S = {
-  label: { fontSize:'10px', color:'var(--accent-blue)', letterSpacing:'2px', marginBottom:'6px', display:'block' },
-  select: { width:'100%', background:'var(--bg-base)', border:'1px solid var(--border)', borderRadius:'var(--radius-sm)', color:'var(--text-primary)', padding:'5px 8px', fontSize:'11px', fontFamily:'var(--font-mono)', cursor:'pointer' },
-  card: { background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:'var(--radius)', padding:'12px 14px' },
-  btn: { background:'linear-gradient(135deg,#1d4ed8,#7c3aed)', color:'white', border:'none', borderRadius:'var(--radius)', padding:'8px 18px', fontSize:'10px', letterSpacing:'2px', fontFamily:'var(--font-mono)', cursor:'pointer' },
-  btnSm: { background:'var(--bg-elevated)', color:'var(--text-secondary)', border:'1px solid var(--border)', borderRadius:'var(--radius-sm)', padding:'4px 10px', fontSize:'10px', fontFamily:'var(--font-mono)', cursor:'pointer' },
-  btnDanger: { background:'#450a0a', color:'#fca5a5', border:'1px solid #ef4444', borderRadius:'var(--radius-sm)', padding:'4px 10px', fontSize:'10px', fontFamily:'var(--font-mono)', cursor:'pointer' },
-  row: { display:'grid', gridTemplateColumns:'1fr 1fr 1fr 1fr auto', gap:'8px', alignItems:'end', marginBottom:'8px' },
+  label:    { fontSize:'10px', color:'var(--accent-blue)', letterSpacing:'2px', marginBottom:'6px', display:'block' },
+  select:   { width:'100%', background:'var(--bg-base)', border:'1px solid var(--border)', borderRadius:'var(--radius-sm)', color:'var(--text-primary)', padding:'5px 8px', fontSize:'11px', fontFamily:'var(--font-mono)', cursor:'pointer' },
+  card:     { background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:'var(--radius)', padding:'12px 14px' },
+  btn:      { background:'linear-gradient(135deg,#1d4ed8,#7c3aed)', color:'white', border:'none', borderRadius:'var(--radius)', padding:'8px 18px', fontSize:'10px', letterSpacing:'2px', fontFamily:'var(--font-mono)', cursor:'pointer' },
+  btnSm:    { background:'var(--bg-elevated)', color:'var(--text-secondary)', border:'1px solid var(--border)', borderRadius:'var(--radius-sm)', padding:'4px 10px', fontSize:'10px', fontFamily:'var(--font-mono)', cursor:'pointer' },
+  btnDanger:{ background:'#450a0a', color:'#fca5a5', border:'1px solid #ef4444', borderRadius:'var(--radius-sm)', padding:'4px 10px', fontSize:'10px', fontFamily:'var(--font-mono)', cursor:'pointer' },
+  th:       { padding:'6px 10px', textAlign:'left', color:'var(--text-muted)', letterSpacing:'1px', fontWeight:'600', fontSize:'9px', borderBottom:'1px solid var(--border)', background:'var(--bg-elevated)' },
+  td:       { padding:'5px 10px', fontSize:'10px', fontFamily:'var(--font-mono)', borderBottom:'1px solid var(--border)' },
 };
 
-// Map Claude's raw location string to a known LOCATION_TYPES value
-function normalizeLocation(raw) {
-  if (!raw) return 'main_or';
-  const s = raw.toLowerCase();
-  if (s.includes('endo'))            return 'endo';
-  if (s.includes('boos'))            return 'boos';
-  if (s.includes('cath') || s.includes('ep') || s.includes('cl')) return 'cath_ep';
-  if (s.includes('ir'))              return 'ir';
-  if (s.includes('cardiac') || s.includes('open heart')) return 'cardiac';
-  return 'main_or';
+function formatDate(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso + 'T12:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' }); }
+  catch { return iso; }
 }
 
-function emptyEntry() {
-  return { anesthetist: '', location: '', room: '', mdDirecting: '', notes: '' };
+// Compress image to ≤1200px wide before sending — day sheets don't need full resolution
+async function compressImage(base64, maxPx = 1200) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxPx / img.width);
+      const canvas = document.createElement('canvas');
+      canvas.width  = Math.round(img.width  * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.85).split(',')[1]);
+    };
+    img.src = 'data:image/jpeg;base64,' + base64;
+  });
 }
 
-export default function HistoryTab({ qg }) {
-  const [historyDate, setHistoryDate] = useState('');
-  const [entries, setEntries] = useState([emptyEntry()]);
-  const [savedDates, setSavedDates] = useState([]);
-  const [viewDate, setViewDate] = useState('');
-  const [viewData, setViewData] = useState([]);
-  const [saved, setSaved] = useState(false);
-  const [locationCounts, setLocationCounts] = useState({});
-  const [activeView, setActiveView] = useState('entry'); // 'entry' | 'history' | 'stats' | 'import'
+async function parseDaySheet(imageBase64) {
+  const compressed = await compressImage(imageBase64);
+  const prompt = `You are parsing a handwritten anesthesia assignment day sheet from IU Health Ball Memorial Hospital.
 
-  // ── Import state ──────────────────────────────────────────────
-  const [importDate, setImportDate] = useState('');
-  const [importImage, setImportImage] = useState(null);   // base64 data URL
-  const [importImageName, setImportImageName] = useState('');
-  const [importParsing, setImportParsing] = useState(false);
-  const [importEntries, setImportEntries] = useState([]);  // parsed rows, editable
-  const [importError, setImportError] = useState('');
-  const [importSaved, setImportSaved] = useState(false);
-  const [importConfidence, setImportConfidence] = useState(null);
-  const [importNotes, setImportNotes] = useState('');
-  const importFileRef = useRef(null);
+Extract ALL assignments visible on the sheet. Return ONLY valid JSON — no markdown, no explanation, no backticks.
 
-  useEffect(() => {
-    setSavedDates(getAllDates());
-    setLocationCounts(getAnesthetistLocationCounts());
-  }, [saved]);
-
-  const addRow = () => setEntries(prev => [...prev, emptyEntry()]);
-  const removeRow = (i) => setEntries(prev => prev.filter((_, idx) => idx !== i));
-  const updateEntry = (i, field, value) => setEntries(prev => prev.map((e, idx) => idx === i ? { ...e, [field]: value } : e));
-
-  const handleSave = () => {
-    if (!historyDate) return;
-    const valid = entries.filter(e => e.anesthetist && e.location);
-    const roomObjects = valid.map(e => ({
-      room: e.room || e.location,
-      isEndo: e.location === 'endo',
-      isBOOS: e.location === 'boos',
-      isCathEP: e.location === 'cath_ep',
-      blockRequired: false,
-      isCardiac: e.location === 'cath_ep',
-      isCareTeam: e.mdDirecting ? true : false,
-      careTeamRatio: '1:3',
-      anesthetist: e.anesthetist,
-      assignedProvider: e.mdDirecting || null,
-    }));
-    saveFullDayHistory(historyDate, roomObjects);
-    setSaved(s => !s);
-    setSavedDates(getAllDates());
-    setLocationCounts(getAnesthetistLocationCounts());
-    setEntries([emptyEntry()]);
-    setHistoryDate('');
-    alert(`Saved ${valid.length} entries for ${historyDate}`);
-  };
-
-  const handleView = (date) => {
-    setViewDate(date);
-    setViewData(getHistoryForDate(date));
-    setActiveView('history');
-  };
-
-  const handleDelete = (date) => {
-    if (!confirm(`Delete all history for ${date}?`)) return;
-    deleteHistoryDate(date);
-    setSavedDates(getAllDates());
-    if (viewDate === date) { setViewDate(''); setViewData([]); }
-  };
-
-  // ── Import handlers ───────────────────────────────────────────
-  const handleImageUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setImportImageName(file.name);
-    setImportEntries([]);
-    setImportSaved(false);
-    setImportError('');
-    setImportConfidence(null);
-    const reader = new FileReader();
-    reader.onload = () => setImportImage(reader.result);
-    reader.readAsDataURL(file);
-  };
-
-  const runImportParse = async () => {
-    if (!importImage || !importDate) return;
-    setImportParsing(true);
-    setImportError('');
-    setImportEntries([]);
-    setImportSaved(false);
-    setImportConfidence(null);
-
-    try {
-      const base64Data = importImage.split(',')[1];
-      const mediaType  = importImage.split(';')[0].split(':')[1];
-
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } },
-              { type: 'text', text: `This is a handwritten anesthesia assignment day sheet from IU Health Ball Memorial Hospital for ${importDate}.
-
-Extract every row that shows an anesthetist (AA or CRNA) assigned to a room or location. Return ONLY valid JSON — no other text, no markdown.
-
-Format:
+Return exactly:
 {
-  "confidence": 0.0-1.0,
-  "readabilityNotes": "any issues reading the handwriting",
-  "rows": [
+  "confidence": "high | medium | low",
+  "readabilityNotes": "describe illegible sections or null",
+  "staffingNotes": "any general notes written on the sheet or null",
+  "assignments": [
     {
-      "anesthetist": "last name or full name as written",
-      "room": "room name as written (e.g. OR 7, Endo 2, BOOS 1, CL 2)",
-      "location": "main_or | endo | boos | cath_ep | ir | cardiac",
-      "mdDirecting": "attending MD last name if written next to this row, or null",
-      "notes": "any other note in this row, or null"
+      "room": "room name as written (e.g. OR 2, Endo 1, BOOS OR 1, CL 2, IR)",
+      "md": "MD last name as written, or null if not shown",
+      "anesthetist": "anesthetist/CRNA/AA last name, or null",
+      "careTeam": true if this row has both an MD and anesthetist, false otherwise,
+      "callRole": "OR Call / Backup Call / Cardiac Call / Locum / Rank 3 / etc — or null",
+      "notes": "handwritten notes for this row or null"
     }
   ]
 }
 
-Location rules:
-- OR 1-10 → main_or
-- Endo 1-3 → endo
-- BOOS OR 1-2 → boos
-- CL 2, CL 3, CL Minor, EP → cath_ep
-- IR, rIR → ir
-- Cardiac, Open Heart, OR 5 cardiac → cardiac
+Location guide: OR 1–10 = main OR; Endo 1–3 = endoscopy; BOOS OR 1–2 = BOOS; CL 2/3/Minor = cath lab; IR/rIR = interventional radiology.
+If a name is illegible, write your best guess and lower confidence.`;
 
-If you cannot confidently read a name, write your best guess and lower the confidence score.` }
-            ]
-          }]
-        })
-      });
+  const resp = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1500,
+      messages: [{ role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: compressed } },
+        { type: 'text',  text: prompt },
+      ]}],
+    }),
+  });
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error?.message || 'API error');
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || `Server error ${resp.status}`);
+  const text = (data.content || []).map(c => c.text || '').join('');
+  return JSON.parse(text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim());
+}
 
-      const rawText = data.content?.map(c => c.text || '').join('').trim();
-      const clean   = rawText.replace(/```json|```/g, '').trim();
-      const parsed  = JSON.parse(clean);
+// ── Main component ────────────────────────────────────────────────
+export default function HistoryTab({ qg }) {
+  const [view, setView]         = useState('compare');
+  const [dates, setDates]       = useState([]);
+  const [selDate, setSelDate]   = useState('');
+  const [ccSched, setCCSched]   = useState(null);
+  const [coordSched, setCoord]  = useState(null);
+  const [locationCounts, setLC] = useState({});
 
-      setImportConfidence(parsed.confidence);
-      if (parsed.readabilityNotes) setImportNotes(parsed.readabilityNotes);
+  // Import state
+  const [impDate, setImpDate]       = useState('');
+  const [impB64, setImpB64]         = useState(null);
+  const [impName, setImpName]       = useState('');
+  const [impParsing, setImpParsing] = useState(false);
+  const [impResult, setImpResult]   = useState(null);
+  const [impError, setImpError]     = useState('');
+  const [impSaved, setImpSaved]     = useState(false);
+  const fileRef = useRef(null);
 
-      // Convert to editable entries using the same shape as manual entry
-      const rows = (parsed.rows || []).map(r => ({
-        anesthetist: r.anesthetist || '',
-        location: normalizeLocation(r.location),
-        room: r.room || '',
-        mdDirecting: r.mdDirecting || '',
-        notes: r.notes || '',
-      }));
-
-      setImportEntries(rows.length > 0 ? rows : [emptyEntry()]);
-    } catch (e) {
-      setImportError(e.message || 'Parse failed. Check image quality and try again.');
-    }
-
-    setImportParsing(false);
+  const reload = () => {
+    const d = getScheduleDates();
+    setDates(d);
+    setLC(getAnesthetistLocationCounts());
+    if (selDate) { setCCSched(getCCSchedule(selDate)); setCoord(getCoordSchedule(selDate)); }
   };
 
-  const updateImportEntry = (i, field, value) =>
-    setImportEntries(prev => prev.map((e, idx) => idx === i ? { ...e, [field]: value } : e));
-  const removeImportRow = (i) =>
-    setImportEntries(prev => prev.filter((_, idx) => idx !== i));
-  const addImportRow = () =>
-    setImportEntries(prev => [...prev, emptyEntry()]);
+  useEffect(reload, []);
+
+  // Load schedule data when date changes
+  useEffect(() => {
+    if (!selDate) { setCCSched(null); setCoord(null); return; }
+    setCCSched(getCCSchedule(selDate));
+    setCoord(getCoordSchedule(selDate));
+  }, [selDate]);
+
+  // ── Import handlers ───────────────────────────────────────────
+  const handleFile = e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImpName(file.name);
+    setImpResult(null); setImpError(''); setImpSaved(false);
+    const reader = new FileReader();
+    reader.onload = () => setImpB64(reader.result.split(',')[1]);
+    reader.readAsDataURL(file);
+  };
+
+  const handleParse = async () => {
+    if (!impB64 || !impDate) return;
+    setImpParsing(true); setImpError(''); setImpResult(null); setImpSaved(false);
+    try {
+      const result = await parseDaySheet(impB64);
+      setImpResult(result);
+    } catch (e) {
+      setImpError(e.message || 'Parse failed. Check image quality and try again.');
+    }
+    setImpParsing(false);
+  };
 
   const handleSaveImport = () => {
-    if (!importDate) return;
-    const valid = importEntries.filter(e => e.anesthetist && e.location);
-    const roomObjects = valid.map(e => ({
-      room: e.room || e.location,
-      isEndo: e.location === 'endo',
-      isBOOS: e.location === 'boos',
-      isCathEP: e.location === 'cath_ep',
-      blockRequired: false,
-      isCardiac: e.location === 'cath_ep',
-      isCareTeam: e.mdDirecting ? true : false,
-      careTeamRatio: '1:3',
-      anesthetist: e.anesthetist,
-      assignedProvider: e.mdDirecting || null,
-    }));
-    saveFullDayHistory(importDate, roomObjects);
-    setSaved(s => !s);
-    setSavedDates(getAllDates());
-    setLocationCounts(getAnesthetistLocationCounts());
-    setImportSaved(true);
+    if (!impResult || !impDate) return;
+    saveCoordSchedule(impDate, impResult.assignments || [], {
+      confidence:       impResult.confidence,
+      readabilityNotes: impResult.readabilityNotes,
+      staffingNotes:    impResult.staffingNotes,
+    });
+    setImpSaved(true);
+    reload();
   };
 
-  const anesthetistList = qg?.Anesthetists?.filter(a => !a.isAdmin && !a.isOff).map(a => a.name).length > 0
-    ? [...new Set([
-        ...qg.Anesthetists.filter(a => !a.isAdmin && !a.isOff).map(a => a.name),
-        ...ANESTHETIST_ROSTER
-      ])].sort()
-    : ANESTHETIST_ROSTER;
+  const handleDeleteCC    = d => { if (confirm(`Delete CC schedule for ${d}?`))    { deleteCCSchedule(d);    reload(); } };
+  const handleDeleteCoord = d => { if (confirm(`Delete coordinator schedule for ${d}?`)) { deleteCoordSchedule(d); reload(); } };
 
   return (
     <div>
       {/* Sub-navigation */}
-      <div style={{display:'flex',gap:'4px',marginBottom:'20px',borderBottom:'1px solid var(--border)',paddingBottom:'0'}}>
-        {[
-          ['entry',  'ENTER HISTORY'],
-          ['import', 'IMPORT FROM SCAN'],
-          ['history','VIEW HISTORY'],
-          ['stats',  'ANESTHETIST STATS'],
-        ].map(([id, label]) => (
-          <button key={id} onClick={() => setActiveView(id)} style={{
-            background: activeView===id ? 'var(--bg-elevated)' : 'transparent',
-            color: activeView===id ? 'var(--accent-blue)' : 'var(--text-muted)',
-            border:'none', borderBottom: activeView===id ? '2px solid var(--accent-blue)' : '2px solid transparent',
+      <div style={{ display:'flex', gap:'4px', marginBottom:'20px', borderBottom:'1px solid var(--border)', paddingBottom:'0' }}>
+        {[['compare','COMPARE SCHEDULES'],['import','IMPORT COORDINATOR'],['stats','ANESTHETIST STATS']].map(([id, label]) => (
+          <button key={id} onClick={() => setView(id)} style={{
+            background: view===id ? 'var(--bg-elevated)' : 'transparent',
+            color: view===id ? 'var(--accent-blue)' : 'var(--text-muted)',
+            border:'none', borderBottom: view===id ? '2px solid var(--accent-blue)' : '2px solid transparent',
             padding:'8px 14px', fontSize:'10px', letterSpacing:'2px', fontFamily:'var(--font-mono)', cursor:'pointer',
           }}>{label}</button>
         ))}
       </div>
 
-      {/* ENTRY TAB */}
-      {activeView === 'entry' && (
+      {/* ── COMPARE ── */}
+      {view === 'compare' && (
         <div>
-          <span style={S.label}>ENTER PAST SCHEDULE DATA</span>
-          <div style={{...S.card, marginBottom:'16px'}}>
-            <div style={{marginBottom:'12px', display:'flex', gap:'12px', alignItems:'center'}}>
-              <div>
-                <span style={{...S.label, marginBottom:'4px'}}>DATE</span>
-                <input type="date" value={historyDate} onChange={e=>setHistoryDate(e.target.value)}
-                  style={{...S.select, width:'160px'}} />
+          <span style={S.label}>COMPARE — COMMAND CENTER VS COORDINATOR SCHEDULE</span>
+          <p style={{ fontSize:'11px', color:'var(--text-muted)', marginTop:0, marginBottom:'16px' }}>
+            Save assignments from the Assignments tab ("SAVE TO HISTORY") to record the command center schedule.
+            Import Jenni's day sheet below to record the coordinator schedule. Both appear here side by side.
+          </p>
+
+          <div style={{ marginBottom:'16px', display:'flex', gap:'12px', alignItems:'center', flexWrap:'wrap' }}>
+            <div>
+              <span style={{ ...S.label, marginBottom:'4px' }}>SELECT DATE</span>
+              <select style={{ ...S.select, width:'220px' }} value={selDate} onChange={e => setSelDate(e.target.value)}>
+                <option value="">— Pick a date —</option>
+                {dates.map(d => <option key={d} value={d}>{formatDate(d)} ({d})</option>)}
+              </select>
+            </div>
+            {selDate && (
+              <div style={{ display:'flex', gap:'8px', alignItems:'center', marginTop:'18px' }}>
+                {ccSched    && <button style={S.btnDanger} onClick={() => handleDeleteCC(selDate)}>Delete CC</button>}
+                {coordSched && <button style={S.btnDanger} onClick={() => handleDeleteCoord(selDate)}>Delete Coord</button>}
               </div>
-              {historyDate && <span style={{fontSize:'11px',color:'var(--accent-blue)',marginTop:'16px'}}>
-                {new Date(historyDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}
-              </span>}
-            </div>
-
-            <div style={{...S.row, marginBottom:'4px'}}>
-              <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>ANESTHETIST</span>
-              <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>LOCATION TYPE</span>
-              <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>ROOM</span>
-              <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>MD DIRECTING</span>
-              <span></span>
-            </div>
-
-            {entries.map((entry, i) => (
-              <div key={i} style={S.row}>
-                <select style={S.select} value={entry.anesthetist} onChange={e=>updateEntry(i,'anesthetist',e.target.value)}>
-                  <option value="">— Select —</option>
-                  {anesthetistList.map(a => <option key={a} value={a}>{a}</option>)}
-                  <option value="FLOAT">FLOAT</option>
-                </select>
-                <select style={S.select} value={entry.location} onChange={e=>updateEntry(i,'location',e.target.value)}>
-                  <option value="">— Location —</option>
-                  {LOCATION_TYPES.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
-                </select>
-                <select style={S.select} value={entry.room} onChange={e=>updateEntry(i,'room',e.target.value)}>
-                  <option value="">— Room —</option>
-                  {ROOMS.map(r => <option key={r} value={r}>{r}</option>)}
-                </select>
-                <select style={S.select} value={entry.mdDirecting} onChange={e=>updateEntry(i,'mdDirecting',e.target.value)}>
-                  <option value="">— MD (if care team) —</option>
-                  {MDS.map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
-                <button style={S.btnDanger} onClick={()=>removeRow(i)}>✕</button>
-              </div>
-            ))}
-
-            <div style={{display:'flex',gap:'8px',marginTop:'12px'}}>
-              <button style={S.btnSm} onClick={addRow}>+ Add Row</button>
-              <button style={S.btn} onClick={handleSave} disabled={!historyDate}>SAVE HISTORY</button>
-            </div>
+            )}
           </div>
 
-          {savedDates.length > 0 && (
-            <div>
-              <span style={S.label}>SAVED DATES ({savedDates.length})</span>
-              <div style={{display:'flex',flexWrap:'wrap',gap:'6px'}}>
-                {savedDates.map(d => (
-                  <div key={d} style={{display:'flex',gap:'4px',alignItems:'center'}}>
-                    <button style={S.btnSm} onClick={()=>handleView(d)}>{d}</button>
-                    <button style={S.btnDanger} onClick={()=>handleDelete(d)}>✕</button>
+          {!selDate && (
+            <div style={{ color:'var(--text-muted)', fontSize:'11px', fontStyle:'italic' }}>
+              Select a date to view schedules. Dates appear here once you save a CC schedule or import a coordinator day sheet.
+            </div>
+          )}
+
+          {selDate && !ccSched && !coordSched && (
+            <div style={{ color:'var(--text-muted)', fontSize:'11px', fontStyle:'italic' }}>
+              No data saved for {formatDate(selDate)}. Save from the Assignments tab and/or import a coordinator day sheet.
+            </div>
+          )}
+
+          {selDate && (ccSched || coordSched) && (
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px', alignItems:'start' }}>
+
+              {/* CC Schedule column */}
+              <div>
+                <div style={{ fontSize:'10px', color:'#1d4ed8', letterSpacing:'2px', fontWeight:'700', marginBottom:'8px', display:'flex', alignItems:'center', gap:'8px' }}>
+                  COMMAND CENTER
+                  {ccSched && <span style={{ fontSize:'9px', color:'var(--text-muted)', fontWeight:'normal', letterSpacing:'1px' }}>saved {new Date(ccSched.savedAt).toLocaleTimeString()}</span>}
+                </div>
+                {!ccSched ? (
+                  <div style={{ ...S.card, color:'var(--text-muted)', fontSize:'11px', fontStyle:'italic' }}>
+                    No CC schedule saved for this date. Use "SAVE TO HISTORY" on the Assignments tab.
                   </div>
-                ))}
+                ) : (
+                  <div style={{ border:'1px solid var(--border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+                    <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                      <thead>
+                        <tr>
+                          {['ROOM','MD','ANEST','RATIO'].map(h => <th key={h} style={S.th}>{h}</th>)}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ccSched.rooms.map((r, i) => (
+                          <tr key={i} style={{ background: i%2===0 ? 'var(--bg-surface)' : 'var(--bg-base)' }}>
+                            <td style={{ ...S.td, color:'var(--text-muted)', whiteSpace:'nowrap' }}>{r.room}</td>
+                            <td style={{ ...S.td, color:'#1d4ed8', fontWeight:'600' }}>{r.md || '—'}</td>
+                            <td style={{ ...S.td, color:'#be185d', fontWeight:'600' }}>{r.anesthetist || '—'}</td>
+                            <td style={{ ...S.td, color:'var(--text-muted)' }}>{r.isCareTeam ? r.careTeamRatio : r.md ? 'solo' : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Coordinator column */}
+              <div>
+                <div style={{ fontSize:'10px', color:'#7c3aed', letterSpacing:'2px', fontWeight:'700', marginBottom:'8px', display:'flex', alignItems:'center', gap:'8px' }}>
+                  COORDINATOR (JENNI)
+                  {coordSched && (
+                    <>
+                      <span style={{ fontSize:'9px', color:'var(--text-muted)', fontWeight:'normal', letterSpacing:'1px' }}>saved {new Date(coordSched.savedAt).toLocaleTimeString()}</span>
+                      <span style={{ fontSize:'9px', letterSpacing:'1px', fontWeight:'700', color: CONF_COLOR[coordSched.confidence] || '#475569', textTransform:'uppercase' }}>{coordSched.confidence}</span>
+                    </>
+                  )}
+                </div>
+                {!coordSched ? (
+                  <div style={{ ...S.card, color:'var(--text-muted)', fontSize:'11px', fontStyle:'italic' }}>
+                    No coordinator schedule imported for this date. Use the "Import Coordinator" tab.
+                  </div>
+                ) : (
+                  <div>
+                    {coordSched.readabilityNotes && (
+                      <div style={{ fontSize:'10px', color:'var(--accent-amber)', background:'#fffbeb', border:'1px solid #f59e0b', borderRadius:'var(--radius-sm)', padding:'6px 10px', marginBottom:'8px' }}>
+                        ⚠ {coordSched.readabilityNotes}
+                      </div>
+                    )}
+                    {coordSched.staffingNotes && (
+                      <div style={{ fontSize:'10px', color:'var(--text-secondary)', background:'var(--bg-elevated)', border:'1px solid var(--border)', borderRadius:'var(--radius-sm)', padding:'6px 10px', marginBottom:'8px' }}>
+                        {coordSched.staffingNotes}
+                      </div>
+                    )}
+                    <div style={{ border:'1px solid var(--border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+                      <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                        <thead>
+                          <tr>
+                            {['ROOM','MD','ANEST','NOTES'].map(h => <th key={h} style={S.th}>{h}</th>)}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {coordSched.assignments.map((a, i) => (
+                            <tr key={i} style={{ background: i%2===0 ? 'var(--bg-surface)' : 'var(--bg-base)' }}>
+                              <td style={{ ...S.td, color:'var(--text-muted)', whiteSpace:'nowrap' }}>{a.room || '—'}</td>
+                              <td style={{ ...S.td, color:'#1d4ed8', fontWeight:'600' }}>{a.md || '—'}</td>
+                              <td style={{ ...S.td, color:'#be185d', fontWeight:'600' }}>{a.anesthetist || '—'}</td>
+                              <td style={{ ...S.td, color:'var(--text-muted)', fontSize:'9px' }}>{a.notes || a.callRole || (a.careTeam ? 'Care Team' : '—')}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
         </div>
       )}
 
-      {/* IMPORT FROM SCAN TAB */}
-      {activeView === 'import' && (
+      {/* ── IMPORT COORDINATOR ── */}
+      {view === 'import' && (
         <div>
-          <span style={S.label}>IMPORT FROM HANDWRITTEN DAY SHEET</span>
-          <div style={{...S.card, marginBottom:'16px'}}>
-            <div style={{fontSize:'10px',color:'var(--text-muted)',marginBottom:'14px',lineHeight:'1.6'}}>
-              Upload a photo or scan of Jenni's day sheet. Claude will read the handwriting and pre-fill the rows below for review before saving.
-            </div>
+          <span style={S.label}>IMPORT COORDINATOR SCHEDULE — JENNI'S DAY SHEET</span>
+          <p style={{ fontSize:'11px', color:'var(--text-muted)', marginTop:0, marginBottom:'16px' }}>
+            Upload a photo of the handwritten day sheet. AI reads the assignments and pre-fills the table for review before saving.
+            Saved data appears in the Compare tab for the selected date.
+          </p>
 
-            {/* Date + file upload row */}
-            <div style={{display:'grid',gridTemplateColumns:'160px 1fr',gap:'12px',marginBottom:'14px',alignItems:'end'}}>
+          <div style={{ ...S.card, marginBottom:'16px' }}>
+            <div style={{ display:'grid', gridTemplateColumns:'160px 1fr', gap:'12px', marginBottom:'14px', alignItems:'end' }}>
               <div>
-                <span style={{...S.label, marginBottom:'4px'}}>DATE</span>
-                <input type="date" value={importDate}
-                  onChange={e => { setImportDate(e.target.value); setImportSaved(false); }}
-                  style={{...S.select, width:'100%'}} />
+                <span style={{ ...S.label, marginBottom:'4px' }}>DATE</span>
+                <input type="date" value={impDate}
+                  onChange={e => { setImpDate(e.target.value); setImpSaved(false); setImpResult(null); }}
+                  style={{ ...S.select, width:'100%' }} />
               </div>
               <div>
-                <span style={{...S.label, marginBottom:'4px'}}>DAY SHEET IMAGE</span>
-                <input ref={importFileRef} type="file" accept="image/*" onChange={handleImageUpload} style={{display:'none'}} />
-                <button onClick={() => importFileRef.current?.click()}
-                  style={{
-                    width:'100%', background:'var(--bg-base)',
-                    border: `1px dashed ${importImage ? '#22c55e' : 'var(--border)'}`,
-                    borderRadius:'var(--radius)', color: importImage ? '#4ade80' : 'var(--text-muted)',
-                    padding:'9px 12px', fontSize:'10px', fontFamily:'var(--font-mono)',
-                    cursor:'pointer', letterSpacing:'1px', textAlign:'left',
-                  }}>
-                  {importImage ? `✓  ${importImageName}` : '+ CLICK TO UPLOAD SCAN (JPG / PNG)'}
+                <span style={{ ...S.label, marginBottom:'4px' }}>DAY SHEET IMAGE (JPG/PNG)</span>
+                <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display:'none' }} />
+                <button onClick={() => fileRef.current?.click()} style={{
+                  width:'100%', background:'var(--bg-base)', cursor:'pointer', padding:'9px 12px',
+                  fontSize:'10px', fontFamily:'var(--font-mono)', letterSpacing:'1px', textAlign:'left',
+                  border: `1px dashed ${impB64 ? '#22c55e' : 'var(--border)'}`,
+                  color: impB64 ? '#4ade80' : 'var(--text-muted)',
+                  borderRadius:'var(--radius)',
+                }}>
+                  {impB64 ? `✓  ${impName}` : '+ CLICK TO UPLOAD SCAN (JPG / PNG)'}
                 </button>
               </div>
             </div>
 
-            {/* Image preview */}
-            {importImage && (
-              <img src={importImage} alt="Day sheet preview"
-                style={{width:'100%',maxHeight:'220px',objectFit:'contain',borderRadius:'var(--radius)',border:'1px solid var(--border)',background:'#111',marginBottom:'14px'}}
-              />
-            )}
-
-            <button style={{...S.btn, opacity:(!importImage||!importDate||importParsing)?0.45:1}}
-              onClick={runImportParse}
-              disabled={!importImage || !importDate || importParsing}>
-              {importParsing ? '● READING HANDWRITING...' : 'PARSE WITH AI VISION'}
+            <button style={{ ...S.btn, opacity: (!impB64 || !impDate || impParsing) ? 0.45 : 1 }}
+              onClick={handleParse} disabled={!impB64 || !impDate || impParsing}>
+              {impParsing ? '● READING HANDWRITING...' : 'PARSE WITH AI VISION'}
             </button>
 
-            {importError && (
-              <div style={{background:'#450a0a',border:'1px solid #ef4444',borderRadius:'var(--radius)',padding:'9px 12px',marginTop:'10px',fontSize:'10px',color:'#fca5a5'}}>
-                ⚠ {importError}
+            {impError && (
+              <div style={{ background:'#450a0a', border:'1px solid #ef4444', borderRadius:'var(--radius)', padding:'9px 12px', marginTop:'10px', fontSize:'10px', color:'#fca5a5' }}>
+                ⚠ {impError}
               </div>
             )}
           </div>
 
-          {/* Parsed results — editable before saving */}
-          {importEntries.length > 0 && importEntries[0].anesthetist !== '' && (
+          {impResult && (
             <div>
-              {/* Confidence + notes banner */}
-              {importConfidence !== null && (
-                <div style={{
-                  background: importConfidence >= 0.8 ? '#0f2a1e' : importConfidence >= 0.6 ? '#2a1a00' : '#450a0a',
-                  border: `1px solid ${importConfidence >= 0.8 ? '#22c55e' : importConfidence >= 0.6 ? '#f59e0b' : '#ef4444'}`,
-                  borderRadius:'var(--radius)', padding:'9px 14px', marginBottom:'12px',
-                  display:'flex', gap:'16px', alignItems:'flex-start',
-                }}>
-                  <div>
-                    <span style={{fontSize:'9px',letterSpacing:'1px',fontWeight:'600',color: importConfidence >= 0.8 ? '#4ade80' : importConfidence >= 0.6 ? '#fbbf24' : '#f87171'}}>
-                      {importConfidence >= 0.8 ? '✓ HIGH CONFIDENCE' : importConfidence >= 0.6 ? '⚠ MEDIUM CONFIDENCE' : '⚠ LOW CONFIDENCE'} — {Math.round(importConfidence * 100)}%
-                    </span>
-                    {importNotes && <div style={{fontSize:'10px',color:'var(--text-secondary)',marginTop:'3px'}}>{importNotes}</div>}
-                  </div>
-                  <div style={{marginLeft:'auto',fontSize:'10px',color:'var(--text-muted)',whiteSpace:'nowrap'}}>
-                    Review and correct rows before saving
-                  </div>
+              {/* Confidence banner */}
+              <div style={{
+                background: CONF_BG[impResult.confidence] || 'var(--bg-elevated)',
+                border: `1px solid ${CONF_COLOR[impResult.confidence] || '#475569'}`,
+                borderRadius:'var(--radius)', padding:'9px 14px', marginBottom:'12px',
+                display:'flex', gap:'16px', alignItems:'center',
+              }}>
+                <span style={{ fontSize:'10px', fontWeight:'700', letterSpacing:'1px', color: CONF_COLOR[impResult.confidence] || '#94a3b8' }}>
+                  {impResult.confidence?.toUpperCase()} CONFIDENCE — {impResult.assignments?.length || 0} assignments extracted
+                </span>
+                {impResult.readabilityNotes && (
+                  <span style={{ fontSize:'10px', color:'var(--text-secondary)' }}>⚠ {impResult.readabilityNotes}</span>
+                )}
+              </div>
+
+              {/* Extracted table */}
+              <div style={{ border:'1px solid var(--border)', borderRadius:'var(--radius)', overflow:'hidden', marginBottom:'12px' }}>
+                <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                  <thead>
+                    <tr>{['ROOM','MD','ANEST','ROLE / NOTES'].map(h => <th key={h} style={S.th}>{h}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {(impResult.assignments || []).map((a, i) => (
+                      <tr key={i} style={{ background: i%2===0 ? 'var(--bg-surface)' : 'var(--bg-base)' }}>
+                        <td style={{ ...S.td, color:'var(--text-muted)' }}>{a.room}</td>
+                        <td style={{ ...S.td, color:'#1d4ed8', fontWeight:'600' }}>{a.md || '—'}</td>
+                        <td style={{ ...S.td, color:'#be185d', fontWeight:'600' }}>{a.anesthetist || '—'}</td>
+                        <td style={{ ...S.td, color:'var(--text-muted)', fontSize:'9px' }}>{a.notes || a.callRole || (a.careTeam ? 'Care Team' : '—')}</td>
+                      </tr>
+                    ))}
+                    {(!impResult.assignments || impResult.assignments.length === 0) && (
+                      <tr><td colSpan={4} style={{ ...S.td, color:'var(--text-muted)', fontStyle:'italic', textAlign:'center' }}>No assignments extracted</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {impResult.staffingNotes && (
+                <div style={{ fontSize:'10px', color:'var(--text-secondary)', background:'var(--bg-elevated)', border:'1px solid var(--border)', borderRadius:'var(--radius-sm)', padding:'8px 12px', marginBottom:'12px' }}>
+                  {impResult.staffingNotes}
                 </div>
               )}
 
-              <span style={S.label}>REVIEW EXTRACTED ROWS — {importEntries.length} FOUND</span>
-              <div style={{...S.card, marginBottom:'12px'}}>
-                <div style={{...S.row, marginBottom:'4px'}}>
-                  <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>ANESTHETIST</span>
-                  <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>LOCATION TYPE</span>
-                  <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>ROOM</span>
-                  <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>MD DIRECTING</span>
-                  <span></span>
+              {impSaved ? (
+                <div style={{ background:'#f0fdf4', border:'1.5px solid #16a34a', borderRadius:'var(--radius)', padding:'10px 14px', color:'#15803d', fontSize:'12px', letterSpacing:'1px', fontWeight:'700' }}>
+                  ✓ SAVED — visible in Compare tab for {formatDate(impDate)}
                 </div>
-
-                {importEntries.map((entry, i) => (
-                  <div key={i} style={S.row}>
-                    {/* Free-text input for anesthetist — vision may return partial names */}
-                    <input
-                      list={`anest-list-${i}`}
-                      style={{...S.select}}
-                      value={entry.anesthetist}
-                      onChange={e => updateImportEntry(i, 'anesthetist', e.target.value)}
-                      placeholder="Anesthetist name"
-                    />
-                    <datalist id={`anest-list-${i}`}>
-                      {anesthetistList.map(a => <option key={a} value={a} />)}
-                    </datalist>
-                    <select style={S.select} value={entry.location} onChange={e=>updateImportEntry(i,'location',e.target.value)}>
-                      <option value="">— Location —</option>
-                      {LOCATION_TYPES.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
-                    </select>
-                    <select style={S.select} value={entry.room} onChange={e=>updateImportEntry(i,'room',e.target.value)}>
-                      <option value="">— Room —</option>
-                      {ROOMS.map(r => <option key={r} value={r}>{r}</option>)}
-                    </select>
-                    <input
-                      list={`md-list-${i}`}
-                      style={{...S.select}}
-                      value={entry.mdDirecting}
-                      onChange={e => updateImportEntry(i, 'mdDirecting', e.target.value)}
-                      placeholder="MD (if care team)"
-                    />
-                    <datalist id={`md-list-${i}`}>
-                      {MDS.map(m => <option key={m} value={m} />)}
-                    </datalist>
-                    <button style={S.btnDanger} onClick={()=>removeImportRow(i)}>✕</button>
-                  </div>
-                ))}
-
-                <div style={{display:'flex',gap:'8px',marginTop:'12px',alignItems:'center'}}>
-                  <button style={S.btnSm} onClick={addImportRow}>+ Add Row</button>
-                  {!importSaved ? (
-                    <button style={S.btn} onClick={handleSaveImport} disabled={!importDate}>
-                      SAVE TO HISTORY
-                    </button>
-                  ) : (
-                    <span style={{fontSize:'10px',color:'#4ade80',letterSpacing:'1px',fontWeight:'600'}}>✓ SAVED — visible in View History and Stats</span>
-                  )}
-                </div>
-              </div>
+              ) : (
+                <button style={S.btn} onClick={handleSaveImport} disabled={!impDate || !(impResult.assignments?.length)}>
+                  SAVE COORDINATOR SCHEDULE
+                </button>
+              )}
             </div>
           )}
         </div>
       )}
 
-      {/* HISTORY VIEW TAB */}
-      {activeView === 'history' && (
-        <div>
-          <div style={{display:'flex',gap:'12px',alignItems:'center',marginBottom:'16px'}}>
-            <span style={S.label}>VIEW HISTORY</span>
-            <select style={{...S.select,width:'160px'}} value={viewDate} onChange={e=>{setViewDate(e.target.value);setViewData(getHistoryForDate(e.target.value));}}>
-              <option value="">— Select date —</option>
-              {savedDates.map(d => <option key={d} value={d}>{d}</option>)}
-            </select>
-          </div>
-
-          {viewData.length > 0 ? (
-            <div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:'8px',marginBottom:'6px'}}>
-                {['ANESTHETIST','LOCATION','ROOM','MD DIRECTING'].map(h => (
-                  <span key={h} style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>{h}</span>
-                ))}
-              </div>
-              {viewData.map((e, i) => (
-                <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:'8px',marginBottom:'5px',padding:'8px',background:'var(--bg-elevated)',borderRadius:'var(--radius-sm)'}}>
-                  <span style={{fontSize:'11px',color:'var(--text-primary)'}}>{e.anesthetist}</span>
-                  <span style={{fontSize:'11px',color:'var(--text-secondary)'}}>{LOCATION_TYPES.find(l=>l.value===e.location)?.label || e.location}</span>
-                  <span style={{fontSize:'11px',color:'var(--text-secondary)'}}>{e.room || '—'}</span>
-                  <span style={{fontSize:'11px',color:'var(--text-muted)'}}>{e.mdDirecting || '—'}</span>
-                </div>
-              ))}
-            </div>
-          ) : viewDate ? (
-            <div style={{color:'var(--text-muted)',fontSize:'11px'}}>No data for this date.</div>
-          ) : null}
-        </div>
-      )}
-
-      {/* STATS TAB */}
-      {activeView === 'stats' && (
+      {/* ── STATS ── */}
+      {view === 'stats' && (
         <div>
           <span style={S.label}>ANESTHETIST LOCATION HISTORY</span>
-          <div style={{fontSize:'10px',color:'var(--text-muted)',marginBottom:'12px'}}>
-            Tracks how many times each anesthetist has been assigned to each location type. Used to ensure variety in assignments.
-          </div>
+          <p style={{ fontSize:'10px', color:'var(--text-muted)', marginTop:0, marginBottom:'12px' }}>
+            Tracks how many times each anesthetist has been to each location. Used to ensure variety in assignments.
+            Populated from saved CC schedules.
+          </p>
           {Object.keys(locationCounts).length === 0 ? (
-            <div style={{color:'var(--text-muted)',fontSize:'11px'}}>No history data yet. Enter past schedules on the Entry tab.</div>
+            <div style={{ color:'var(--text-muted)', fontSize:'11px' }}>No history data yet. Save CC schedules from the Assignments tab.</div>
           ) : (
             <div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr repeat(6, auto)',gap:'8px',marginBottom:'8px',padding:'6px 10px'}}>
-                <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>ANESTHETIST</span>
-                {LOCATION_TYPES.map(l => <span key={l.value} style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',textAlign:'center'}}>{l.label.split(' ')[0].toUpperCase()}</span>)}
+              <div style={{ display:'grid', gridTemplateColumns:`1fr repeat(${LOCATION_TYPES.length}, auto)`, gap:'8px', marginBottom:'8px', padding:'6px 10px' }}>
+                <span style={{ fontSize:'9px', color:'var(--text-muted)', letterSpacing:'1px' }}>ANESTHETIST</span>
+                {LOCATION_TYPES.map(l => (
+                  <span key={l.value} style={{ fontSize:'9px', color:'var(--text-muted)', letterSpacing:'1px', textAlign:'center' }}>
+                    {l.label.split(' ')[0].toUpperCase()}
+                  </span>
+                ))}
               </div>
-              {Object.entries(locationCounts).sort(([a],[b])=>a.localeCompare(b)).map(([name, counts]) => (
-                <div key={name} style={{display:'grid',gridTemplateColumns:'1fr repeat(6, auto)',gap:'8px',padding:'7px 10px',background:'var(--bg-elevated)',borderRadius:'var(--radius-sm)',marginBottom:'4px',alignItems:'center'}}>
-                  <span style={{fontSize:'11px',color:'var(--text-primary)'}}>{name}</span>
+              {Object.entries(locationCounts).sort(([a],[b]) => a.localeCompare(b)).map(([name, counts]) => (
+                <div key={name} style={{ display:'grid', gridTemplateColumns:`1fr repeat(${LOCATION_TYPES.length}, auto)`, gap:'8px', padding:'7px 10px', background:'var(--bg-elevated)', borderRadius:'var(--radius-sm)', marginBottom:'4px', alignItems:'center' }}>
+                  <span style={{ fontSize:'11px', color:'var(--text-primary)' }}>{name}</span>
                   {LOCATION_TYPES.map(l => {
                     const count = counts[l.value] || 0;
-                    const max = Math.max(...Object.values(counts));
-                    const isHigh = count > 0 && count === max;
+                    const max   = Math.max(...Object.values(counts));
                     return (
-                      <span key={l.value} style={{
-                        fontSize:'11px', textAlign:'center',
-                        color: isHigh ? 'var(--accent-amber)' : count > 0 ? 'var(--text-secondary)' : 'var(--text-faint)',
-                        fontWeight: isHigh ? '600' : 'normal',
-                      }}>{count || '—'}</span>
+                      <span key={l.value} style={{ fontSize:'11px', textAlign:'center', color: count > 0 && count === max ? 'var(--accent-amber)' : count > 0 ? 'var(--text-secondary)' : 'var(--text-faint)', fontWeight: count > 0 && count === max ? '600' : 'normal' }}>
+                        {count || '—'}
+                      </span>
                     );
                   })}
                 </div>

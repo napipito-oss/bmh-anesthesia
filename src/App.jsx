@@ -3,7 +3,7 @@ import { PROVIDERS, ANESTHETIST_SHIFTS, LATE_STAY_PRIORITY } from './data/provid
 import { SURGEON_BLOCKS } from './data/surgeons.js';
 import { parseQGenda, parseCubeData, buildAssignments } from './utils/parsers.js';
 import { buildCareTeams, CARE_TEAM_COLORS } from './utils/careTeams.js';
-import { getAnesthetistLocationCounts, saveFullDayHistory } from './utils/history.js';
+import { getAnesthetistLocationCounts, saveFullDayHistory, saveCCSchedule } from './utils/history.js';
 import { saveORCallChoice, getORCallPrediction } from './utils/orCallTracker.js';
 import { callAI } from './utils/api.js';
 import HistoryTab from './components/HistoryTab.jsx';
@@ -112,7 +112,6 @@ const TABS = [
   { id: 'providers', label: 'PROVIDER INTEL' },
   { id: 'surgeons',  label: 'SURGEON DB' },
   { id: 'history',   label: 'HISTORY' },
-  { id: 'import',    label: 'IMPORT HISTORY' },
   { id: 'ai',        label: 'AI ASSISTANT' },
 ];
 
@@ -158,106 +157,6 @@ function buildPairsFromFractional(fractionalPairs, rooms) {
   return newPairs;
 }
 
-// ── IMPORT HISTORY STORAGE HELPERS ───────────────────────────
-const HISTORY_PREFIX = 'daysheet:';
-
-async function saveImportedDay(record) {
-  const key = `${HISTORY_PREFIX}${record.date}`;
-  try {
-    await window.storage.set(key, JSON.stringify(record));
-    return true;
-  } catch (e) {
-    console.error('Storage save error:', e);
-    return false;
-  }
-}
-
-async function loadAllImportedDays() {
-  try {
-    const result = await window.storage.list(HISTORY_PREFIX);
-    const keys = result?.keys || [];
-    const days = [];
-    for (const key of keys) {
-      try {
-        const item = await window.storage.get(key);
-        if (item?.value) days.push(JSON.parse(item.value));
-      } catch {}
-    }
-    return days.sort((a, b) => b.date.localeCompare(a.date));
-  } catch {
-    return [];
-  }
-}
-
-async function deleteImportedDay(date) {
-  const key = `${HISTORY_PREFIX}${date}`;
-  try {
-    await window.storage.delete(key);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ── CLAUDE VISION PARSER ──────────────────────────────────────
-async function parseDaySheetWithVision(imageBase64, cubeRoomsForDate) {
-  const cubeContext = cubeRoomsForDate?.length > 0
-    ? `\n\nFor reference, the cube schedule for this date shows these rooms:\n${cubeRoomsForDate.map(r => `- ${r.room} (${r.acuity || 'routine'}, surgeons: ${r.surgeons?.join(', ') || 'unknown'})`).join('\n')}`
-    : '';
-
-  const prompt = `You are parsing a handwritten anesthesia day sheet from IU Health Ball Memorial Hospital.
-
-Extract ALL assignments visible. Return ONLY valid JSON — no markdown, no explanation, no backticks.
-${cubeContext}
-
-Return this exact structure:
-{
-  "date": "YYYY-MM-DD or null if not visible",
-  "assignments": [
-    {
-      "room": "room name as written (e.g. OR 2, Endo 1, BOOS OR 1, Cath Lab, IR)",
-      "md": "MD last name or full name as written",
-      "anesthetist": "anesthetist name or null",
-      "careTeam": true or false,
-      "callRole": "OR Call / Backup Call / Cardiac Call / OB Call / Locum / Rank 3 / etc — or null",
-      "notes": "any handwritten notes for this row or null"
-    }
-  ],
-  "staffingNotes": "any general staffing notes on the sheet or null",
-  "confidence": "high / medium / low",
-  "readabilityIssues": "describe any illegible sections or null"
-}`;
-
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1000,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 },
-          },
-          { type: 'text', text: prompt },
-        ],
-      }],
-    }),
-  });
-
-  const data = await response.json();
-  if (data.error) throw new Error(data.error.message || 'API error');
-  const text = (data.content || []).map(c => c.text || '').join('');
-  const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-  return JSON.parse(clean);
-}
-
-// ── CONFIDENCE COLORS ─────────────────────────────────────────
-const CONF_COLORS = { high: '#16a34a', medium: '#b45309', low: '#dc2626' };
-const CONF_BG     = { high: '#f0fdf4', medium: '#fffbeb', low: '#fef2f2' };
-
 export default function App() {
   const [tab, setTab] = useState('board');
   const [qgRaw, setQgRaw] = useState('');
@@ -280,104 +179,6 @@ export default function App() {
   const [roomPairs, setRoomPairs] = useState({});
   const [dragSourceRoom, setDragSourceRoom] = useState(null);
   const [dragOverRoom, setDragOverRoom] = useState(null);
-
-  // ── IMPORT HISTORY STATE ──────────────────────────────────────
-  const [importDate, setImportDate] = useState('');
-  const [importImage, setImportImage] = useState(null);
-  const [importImageUrl, setImportImageUrl] = useState(null);
-  const [importCubeRaw, setImportCubeRaw] = useState('');
-  const [importParsing, setImportParsing] = useState(false);
-  const [importResult, setImportResult] = useState(null);
-  const [importError, setImportError] = useState('');
-  const [importedDays, setImportedDays] = useState([]);
-  const [importSaving, setImportSaving] = useState(false);
-  const [importSaved, setImportSaved] = useState(false);
-  const [importViewDay, setImportViewDay] = useState(null);
-  const [storageAvailable, setStorageAvailable] = useState(true);
-
-  useEffect(() => {
-    // Check storage availability and load existing records
-    loadAllImportedDays()
-      .then(days => setImportedDays(days))
-      .catch(() => setStorageAvailable(false));
-  }, []);
-
-  const handleImageUpload = useCallback((e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const url = URL.createObjectURL(file);
-    setImportImageUrl(url);
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = reader.result.split(',')[1];
-      setImportImage(base64);
-    };
-    reader.readAsDataURL(file);
-    setImportResult(null);
-    setImportError('');
-    setImportSaved(false);
-  }, []);
-
-  const handleImportParse = useCallback(async () => {
-    if (!importImage) { setImportError('Upload a day sheet image first.'); return; }
-    setImportParsing(true);
-    setImportError('');
-    setImportResult(null);
-    try {
-      let cubeRooms = [];
-      if (importCubeRaw && importDate) {
-        try {
-          const parsed = parseCubeData(importCubeRaw, importDate);
-          cubeRooms = parsed.rooms || [];
-        } catch {}
-      }
-      const result = await parseDaySheetWithVision(importImage, cubeRooms);
-      // Always use user-specified date if provided
-      if (importDate) result.date = importDate;
-      setImportResult(result);
-    } catch (e) {
-      setImportError(`Parse failed: ${e.message}. Check image quality or try a clearer scan.`);
-    }
-    setImportParsing(false);
-  }, [importImage, importCubeRaw, importDate]);
-
-  const handleImportSave = useCallback(async () => {
-    if (!importResult) return;
-    setImportSaving(true);
-    const record = {
-      date: importResult.date || importDate || 'unknown',
-      assignments: importResult.assignments || [],
-      staffingNotes: importResult.staffingNotes || null,
-      confidence: importResult.confidence || 'low',
-      readabilityIssues: importResult.readabilityIssues || null,
-      importedAt: new Date().toISOString(),
-      hasCubeData: !!importCubeRaw,
-    };
-    const ok = await saveImportedDay(record);
-    if (ok) {
-      setImportSaved(true);
-      const updated = await loadAllImportedDays();
-      setImportedDays(updated);
-      // Reset form for next upload
-      setImportImage(null);
-      setImportImageUrl(null);
-      setImportCubeRaw('');
-      setImportResult(null);
-      setImportDate('');
-    } else {
-      setImportError('Save failed — storage unavailable.');
-    }
-    setImportSaving(false);
-  }, [importResult, importDate, importCubeRaw]);
-
-  const handleDeleteDay = useCallback(async (date) => {
-    const ok = await deleteImportedDay(date);
-    if (ok) {
-      const updated = await loadAllImportedDays();
-      setImportedDays(updated);
-      if (importViewDay?.date === date) setImportViewDay(null);
-    }
-  }, [importViewDay]);
 
   const loadQG = useCallback(() => {
     const parsed = parseQGenda(qgRaw, selectedDate);
@@ -649,7 +450,6 @@ export default function App() {
             <span className={schedLoaded   ? 'status-ok' : 'status-off'}>● Schedule {schedLoaded   ? '✓' : '—'}</span>
             <span className={resourceLoaded? 'status-ok' : 'status-off'}>● Resource {resourceLoaded? '✓' : '—'}</span>
             {pairCount > 0 && <span className="status-ok">⇄ {pairCount} pair{pairCount>1?'s':''}</span>}
-            {importedDays.length > 0 && <span className="status-ok" style={{color:'#a78bfa'}}>📋 {importedDays.length} imported</span>}
             {qg?.aaBackupCall && <span className="status-crit">⚠ AA Backup Call</span>}
             {coverageGaps.filter(g=>g.level==='critical').length > 0 && <span className="status-crit">⚠ {coverageGaps.filter(g=>g.level==='critical').length} gap{coverageGaps.filter(g=>g.level==='critical').length>1?'s':''}</span>}
             {critFlags.length > 0 && <span className="status-crit">⚠ {critFlags.length} critical</span>}
@@ -1008,7 +808,12 @@ export default function App() {
             {schedLoaded && rooms.length > 0 && selectedDate && (
               <div style={{marginBottom:'12px'}}>
                 <button className="btn" style={{fontSize:'9px',padding:'6px 14px',background:'var(--bg-elevated)',color:'var(--accent-green)',border:'1px solid var(--accent-green)'}}
-                  onClick={() => { saveFullDayHistory(selectedDate, rooms.filter(r=>!r.isPhantom)); alert('Assignments saved to history.'); }}>
+                  onClick={() => {
+                    const nonPhantom = rooms.filter(r => !r.isPhantom);
+                    saveFullDayHistory(selectedDate, nonPhantom);  // keeps anesthetist rotation stats
+                    saveCCSchedule(selectedDate, nonPhantom);       // full snapshot for comparison
+                    alert('Assignments saved to history.');
+                  }}>
                   SAVE TO HISTORY
                 </button>
               </div>
@@ -1226,241 +1031,6 @@ export default function App() {
           <div>
             <div className="section-label">ASSIGNMENT HISTORY</div>
             <HistoryTab qg={qg} />
-          </div>
-        )}
-
-        {/* ── IMPORT HISTORY ── */}
-        {tab === 'import' && (
-          <div>
-            <div style={{display:'flex',alignItems:'baseline',gap:'12px',marginBottom:'4px'}}>
-              <div className="section-label" style={{margin:0}}>IMPORT HISTORY — DAY SHEET UPLOAD</div>
-              {importedDays.length > 0 && <span style={{fontSize:'11px',color:'#6d28d9',letterSpacing:'1px',fontWeight:'700'}}>{importedDays.length} RECORDS STORED</span>}
-            </div>
-            <div className="card-hint" style={{marginBottom:'20px'}}>
-              Upload scanned day sheets to build a historical training dataset. Claude vision reads the handwritten grid and extracts assignments.
-              Optionally paste cube data for the same date to enrich the record with case types and acuity.
-            </div>
-
-            {!storageAvailable && (
-              <div className="flag-warn" style={{marginBottom:'16px'}}>⚠ Persistent storage unavailable in this environment. Records will not persist across sessions.</div>
-            )}
-
-            <div className="grid-2" style={{gap:'24px',alignItems:'start',marginBottom:'28px'}}>
-
-              {/* ── LEFT: UPLOAD FORM ── */}
-              <div>
-                <div className="section-label" style={{color:'var(--accent-blue)'}}>STEP 1 — UPLOAD &amp; CONFIGURE</div>
-
-                <div className="card" style={{marginBottom:'10px'}}>
-                  <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'6px'}}>DATE OF THIS DAY SHEET</div>
-                  <input type="date" value={importDate} onChange={e=>{setImportDate(e.target.value);setImportSaved(false);setImportResult(null);}}
-                    style={{background:'var(--bg-base)',border:'1px solid var(--border-bright)',borderRadius:'var(--radius)',color:importDate?'var(--text-primary)':'var(--text-muted)',padding:'7px 12px',fontSize:'12px',fontFamily:'var(--font-mono)',cursor:'pointer',outline:'none',width:'100%',boxSizing:'border-box'}}
-                  />
-                  {!importDate && <div style={{fontSize:'9px',color:'var(--accent-amber)',marginTop:'4px'}}>⚠ Specify the date so it can be stored correctly</div>}
-                </div>
-
-                <div className="card" style={{marginBottom:'10px'}}>
-                  <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'8px'}}>SCANNED DAY SHEET IMAGE</div>
-                  <div style={{fontSize:'10px',color:'var(--text-secondary)',marginBottom:'8px'}}>JPG or PNG. Best results with a flat, well-lit scan. Handwriting doesn't need to be perfect.</div>
-                  <input type="file" accept="image/jpeg,image/png,image/jpg" onChange={handleImageUpload}
-                    style={{display:'block',width:'100%',fontSize:'11px',color:'var(--text-secondary)',fontFamily:'var(--font-mono)',cursor:'pointer'}}
-                  />
-                  {importImageUrl && (
-                    <div style={{marginTop:'10px',border:'1px solid var(--border)',borderRadius:'var(--radius)',overflow:'hidden',background:'#f8fafc'}}>
-                      <img src={importImageUrl} alt="Day sheet preview"
-                        style={{width:'100%',display:'block',maxHeight:'280px',objectFit:'contain'}} />
-                    </div>
-                  )}
-                </div>
-
-                <div className="card" style={{marginBottom:'14px'}}>
-                  <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'4px'}}>CUBE DATA FOR THIS DATE <span style={{color:'var(--text-faint)',fontWeight:'normal',letterSpacing:'0'}}>— OPTIONAL</span></div>
-                  <div style={{fontSize:'10px',color:'var(--text-secondary)',marginBottom:'8px'}}>
-                    Enriches the record with case types and acuity. Paste the same cube data you'd use in Step 3 on the Daily Board — the parser will filter to the date above.
-                  </div>
-                  <textarea className="textarea" value={importCubeRaw} onChange={e=>setImportCubeRaw(e.target.value)}
-                    placeholder="Paste cube schedule for this date (optional)..." style={{height:'90px'}} />
-                </div>
-
-                <button className="btn" onClick={handleImportParse}
-                  disabled={!importImage || importParsing}
-                  style={{width:'100%',opacity:importImage&&!importParsing?1:0.45,background:importParsing?'var(--bg-elevated)':'var(--accent-blue)',color:importParsing?'var(--text-muted)':'#fff',borderColor:importParsing?'var(--border)':'var(--accent-blue)'}}>
-                  {importParsing
-                    ? <span style={{display:'flex',alignItems:'center',justifyContent:'center',gap:'8px'}}><span style={{fontSize:'12px'}}>●</span> READING HANDWRITING...</span>
-                    : 'PARSE WITH CLAUDE VISION'}
-                </button>
-                {importError && <div className="flag-crit" style={{marginTop:'10px'}}>{importError}</div>}
-              </div>
-
-              {/* ── RIGHT: RESULT ── */}
-              <div>
-                <div className="section-label" style={{color:'var(--accent-blue)'}}>STEP 2 — REVIEW &amp; SAVE</div>
-
-                {!importResult && !importParsing && (
-                  <div style={{color:'var(--text-muted)',fontSize:'11px',fontStyle:'italic',paddingTop:'12px'}}>
-                    Upload a day sheet and click "Parse" to extract assignments.
-                  </div>
-                )}
-
-                {importParsing && (
-                  <div style={{padding:'20px 0',display:'flex',flexDirection:'column',gap:'8px',alignItems:'flex-start'}}>
-                    <div style={{display:'flex',alignItems:'center',gap:'10px',color:'var(--accent-blue)',fontSize:'11px'}}>
-                      <span style={{fontSize:'16px',lineHeight:1}}>●</span>
-                      <span>Sending image to Claude vision...</span>
-                    </div>
-                    <div style={{fontSize:'10px',color:'var(--text-muted)',paddingLeft:'26px'}}>This takes 5–15 seconds depending on image complexity.</div>
-                  </div>
-                )}
-
-                {importSaved && !importResult && (
-                  <div style={{background:'#f0fdf4',border:'1.5px solid #16a34a',borderRadius:'var(--radius)',padding:'14px 16px',marginTop:'8px'}}>
-                    <div style={{fontSize:'12px',color:'#15803d',fontWeight:'700',letterSpacing:'1px',marginBottom:'4px'}}>✓ SAVED TO DATABASE</div>
-                    <div style={{fontSize:'11px',color:'var(--text-secondary)'}}>Ready for the next upload. The record appears below in the history list.</div>
-                  </div>
-                )}
-
-                {importResult && (
-                  <div>
-                    {/* Header row: date + confidence + count */}
-                    <div style={{display:'flex',gap:'8px',marginBottom:'12px',flexWrap:'wrap'}}>
-                      <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'6px 12px'}}>
-                        <div style={{fontSize:'8px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'2px'}}>DATE</div>
-                        <div style={{fontSize:'11px',color:'var(--text-primary)',fontFamily:'var(--font-mono)'}}>{importResult.date || importDate || 'Unknown'}</div>
-                      </div>
-                      <div style={{background:CONF_BG[importResult.confidence]||'var(--bg-elevated)',border:`1px solid ${CONF_COLORS[importResult.confidence]||'#475569'}`,borderRadius:'var(--radius)',padding:'6px 12px'}}>
-                        <div style={{fontSize:'8px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'2px'}}>CONFIDENCE</div>
-                        <div style={{fontSize:'11px',color:CONF_COLORS[importResult.confidence]||'#94a3b8',fontWeight:'600',textTransform:'uppercase',fontFamily:'var(--font-mono)'}}>{importResult.confidence}</div>
-                      </div>
-                      <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'6px 12px'}}>
-                        <div style={{fontSize:'8px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'2px'}}>ASSIGNMENTS</div>
-                        <div style={{fontSize:'11px',color:'var(--text-primary)',fontFamily:'var(--font-mono)'}}>{importResult.assignments?.length || 0}</div>
-                      </div>
-                    </div>
-
-                    {importResult.readabilityIssues && (
-                      <div className="flag-warn" style={{marginBottom:'10px'}}>
-                        <span style={{fontWeight:'600',letterSpacing:'1px',fontSize:'9px'}}>READABILITY NOTE </span>{importResult.readabilityIssues}
-                      </div>
-                    )}
-
-                    {/* Assignment table */}
-                    <div style={{marginBottom:'14px',border:'1px solid var(--border)',borderRadius:'var(--radius)',overflow:'hidden'}}>
-                      <table style={{width:'100%',borderCollapse:'collapse',fontSize:'10px',fontFamily:'var(--font-mono)'}}>
-                        <thead>
-                          <tr style={{background:'var(--bg-elevated)'}}>
-                            {['ROOM','MD','ANEST','ROLE'].map(h=>(
-                              <th key={h} style={{padding:'6px 10px',textAlign:'left',color:'var(--text-muted)',letterSpacing:'1px',fontWeight:'600',fontSize:'9px',borderBottom:'1px solid var(--border)'}}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(importResult.assignments || []).map((a, i) => (
-                            <tr key={i} style={{borderBottom:'1px solid var(--border)',background:i%2===0?'var(--bg-surface)':'var(--bg-base)'}}>
-                              <td style={{padding:'5px 10px',color:'var(--text-primary)',fontWeight:'500'}}>{a.room}</td>
-                              <td style={{padding:'5px 10px',color:'#1d4ed8',fontWeight:'600'}}>{a.md || '—'}</td>
-                              <td style={{padding:'5px 10px',color:'#be185d',fontWeight:'600'}}>{a.anesthetist || '—'}</td>
-                              <td style={{padding:'5px 10px',color:'var(--text-muted)'}}>
-                                {a.callRole || (a.careTeam ? 'Care Team' : '—')}
-                              </td>
-                            </tr>
-                          ))}
-                          {(!importResult.assignments || importResult.assignments.length === 0) && (
-                            <tr><td colSpan={4} style={{padding:'12px 10px',color:'var(--text-muted)',fontStyle:'italic',textAlign:'center'}}>No assignments extracted</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {importResult.staffingNotes && (
-                      <div className="flag-info" style={{marginBottom:'12px'}}>
-                        <span style={{fontWeight:'600',fontSize:'9px',letterSpacing:'1px'}}>STAFFING NOTE </span>{importResult.staffingNotes}
-                      </div>
-                    )}
-
-                    {importResult.confidence === 'low' && (
-                      <div className="flag-warn" style={{marginBottom:'12px'}}>
-                        Low confidence read. Review the table above carefully before saving — consider rescanning with better lighting or higher resolution.
-                      </div>
-                    )}
-
-                    {importSaved ? (
-                      <div style={{background:'#f0fdf4',border:'1.5px solid #16a34a',borderRadius:'var(--radius)',padding:'10px 14px',color:'#15803d',fontSize:'12px',letterSpacing:'1px',fontWeight:'700'}}>
-                        ✓ SAVED — visible in the history list below
-                      </div>
-                    ) : (
-                      <button className="btn" onClick={handleImportSave} disabled={importSaving||!importResult.assignments?.length}
-                        style={{width:'100%',background:'linear-gradient(135deg,#1d4ed8,#6d28d9)',opacity:importSaving||!importResult.assignments?.length?0.5:1}}>
-                        {importSaving ? 'SAVING...' : 'SAVE TO HISTORY DATABASE'}
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* ── STORED DAYS ── */}
-            <div>
-              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'10px'}}>
-                <div className="section-label" style={{margin:0}}>STORED RECORDS — {importedDays.length} DAYS</div>
-                {importedDays.length > 0 && (
-                  <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>CLICK TO EXPAND · ✕ TO DELETE</span>
-                )}
-              </div>
-
-              {importedDays.length === 0 ? (
-                <div style={{color:'var(--text-muted)',fontSize:'11px',fontStyle:'italic',padding:'12px 0'}}>
-                  No days imported yet. Upload a scanned day sheet above to begin building the dataset.
-                </div>
-              ) : (
-                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(240px,1fr))',gap:'8px'}}>
-                  {importedDays.map(day => {
-                    const isViewing = importViewDay?.date === day.date;
-                    const confColor = CONF_COLORS[day.confidence] || '#475569';
-                    const dateLabel = day.date !== 'unknown'
-                      ? (() => { try { return new Date(day.date+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'}); } catch { return day.date; } })()
-                      : 'Unknown date';
-
-                    return (
-                      <div key={day.date} className="card"
-                        style={{cursor:'pointer',border:`1px solid ${isViewing?'var(--accent-blue)':'var(--border)'}`,background:isViewing?'var(--bg-elevated)':'var(--bg-surface)',transition:'border-color 0.15s'}}
-                        onClick={() => setImportViewDay(isViewing ? null : day)}>
-                        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'8px'}}>
-                          <div style={{flex:1,minWidth:0}}>
-                            <div style={{fontSize:'12px',color:'var(--text-primary)',fontWeight:'600',fontFamily:'var(--font-mono)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{dateLabel}</div>
-                            <div style={{display:'flex',gap:'8px',marginTop:'4px',flexWrap:'wrap'}}>
-                              <span style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>{day.assignments?.length || 0} rooms</span>
-                              {day.hasCubeData && <span style={{fontSize:'9px',color:'var(--accent-teal)',letterSpacing:'1px'}}>+CUBE</span>}
-                              <span style={{fontSize:'9px',color:confColor,letterSpacing:'1px',textTransform:'uppercase'}}>{day.confidence}</span>
-                            </div>
-                          </div>
-                          <button onClick={e=>{e.stopPropagation();handleDeleteDay(day.date);}}
-                            style={{background:'transparent',border:'none',color:'#374151',cursor:'pointer',fontSize:'14px',padding:'0',lineHeight:1,flexShrink:0,marginTop:'1px'}}
-                            title="Delete record">✕</button>
-                        </div>
-
-                        {isViewing && (
-                          <div style={{marginTop:'12px',paddingTop:'10px',borderTop:'1px solid var(--border)'}}>
-                            {day.assignments?.map((a, i) => (
-                              <div key={i} style={{display:'grid',gridTemplateColumns:'55px 1fr 1fr',gap:'6px',fontSize:'10px',fontFamily:'var(--font-mono)',marginBottom:'4px',alignItems:'baseline'}}>
-                                <span style={{color:'var(--text-muted)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.room}</span>
-                                <span style={{color:'#1d4ed8',fontWeight:'600',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.md || '—'}</span>
-                                <span style={{color:'#be185d',fontWeight:'600',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.anesthetist || '—'}</span>
-                              </div>
-                            ))}
-                            {day.staffingNotes && (
-                              <div style={{fontSize:'10px',color:'var(--text-secondary)',marginTop:'8px',fontStyle:'italic',borderTop:'1px solid var(--border)',paddingTop:'6px'}}>{day.staffingNotes}</div>
-                            )}
-                            {day.readabilityIssues && (
-                              <div style={{fontSize:'9px',color:'var(--accent-amber)',marginTop:'6px'}}>⚠ {day.readabilityIssues}</div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
           </div>
         )}
 
