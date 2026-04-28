@@ -2,7 +2,8 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { PROVIDERS, ANESTHETIST_SHIFTS, LATE_STAY_PRIORITY } from './data/providers.js';
 import { SURGEON_BLOCKS } from './data/surgeons.js';
 import { parseQGenda, parseCubeData, buildAssignments } from './utils/parsers.js';
-import { buildCareTeams, CARE_TEAM_COLORS } from './utils/careTeams.js';
+import { CARE_TEAM_COLORS } from './utils/careTeams.js';
+import { buildDailyAssignments } from './engine/assignmentEngine.js';
 import { getAnesthetistLocationCounts, saveFullDayHistory, saveCCSchedule } from './utils/history.js';
 import { saveORCallChoice, getORCallPrediction } from './utils/orCallTracker.js';
 import { callAI } from './utils/api.js';
@@ -126,37 +127,6 @@ const QUICK_PROMPTS = [
   "Which anesthetists need relief first this afternoon?",
 ];
 
-// ── PAIR UTILITIES ────────────────────────────────────────────
-function buildPairsFromFractional(fractionalPairs, rooms) {
-  const newPairs = {};
-  for (const fp of fractionalPairs) {
-    const morningRoom = rooms.find(r => {
-      const b = r.building || '';
-      if (fp.morning === 'IR')      return b === 'IR';
-      if (fp.morning === 'BOOS')    return b === 'BOOS';
-      if (fp.morning === 'CATH')    return b === 'CATH_FLOOR';
-      if (fp.morning === 'ENDO')    return b === 'ENDO_FLOOR';
-      if (fp.morning === 'MAIN OR') return b === 'MAIN_OR_FLOOR';
-      return false;
-    });
-    const afternoonRoom = rooms.find(r => {
-      if (r === morningRoom) return false;
-      const b = r.building || '';
-      if (fp.afternoon === 'IR')      return b === 'IR';
-      if (fp.afternoon === 'BOOS')    return b === 'BOOS';
-      if (fp.afternoon === 'CATH')    return b === 'CATH_FLOOR';
-      if (fp.afternoon === 'ENDO')    return b === 'ENDO_FLOOR';
-      if (fp.afternoon === 'MAIN OR') return b === 'MAIN_OR_FLOOR';
-      return false;
-    });
-    if (morningRoom && afternoonRoom) {
-      newPairs[morningRoom.room]   = afternoonRoom.room;
-      newPairs[afternoonRoom.room] = morningRoom.room;
-    }
-  }
-  return newPairs;
-}
-
 export default function App() {
   const [tab, setTab] = useState('board');
   const [qgRaw, setQgRaw] = useState('');
@@ -217,11 +187,15 @@ export default function App() {
   const finishRef = useRef(null);
 
   const finishBuildingSchedule = useCallback((roomsIn, orChoice) => {
-    const assigned = qg ? buildAssignments(roomsIn, qg, orChoice) : roomsIn;
     const history  = getAnesthetistLocationCounts();
-    const ctResult = qg
-      ? buildCareTeams(assigned, qg, history, resourceStructure, orChoice)
-      : { rooms: assigned, careTeams: [], floats: [], available: [] };
+    const { roomPairs: generatedRoomPairs, ...ctResult } = buildDailyAssignments({
+      rooms: roomsIn,
+      qg,
+      resourceStructure,
+      orCallChoice: orChoice,
+      anesthetistHistory: history,
+      fractionalPairs,
+    });
     setRooms(ctResult.rooms);
     setCareTeamResult(ctResult);
     setOrCallChoice(orChoice);
@@ -256,7 +230,7 @@ export default function App() {
       setOrCallWarning('');
     }
     if (fractionalPairs.length > 0) {
-      setRoomPairs(buildPairsFromFractional(fractionalPairs, ctResult.rooms));
+      setRoomPairs(generatedRoomPairs);
     }
   }, [qg, resourceStructure, fractionalPairs]);
 

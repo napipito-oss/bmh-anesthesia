@@ -51,6 +51,15 @@
 //     Lambert), draining him before Triplet's block rooms were assigned.
 // ─────────────────────────────────────────────────────────────
 import { classifyRoom } from './parsers.js';
+import {
+  BRAND_ENDO_PROVIDER,
+  CARE_TEAM_AVOID,
+  CARE_TEAM_IDEAL_RATIO,
+  CARE_TEAM_LOCATION_HARD_AVOIDANCES,
+  CARE_TEAM_MAX_RATIO,
+  CARE_TEAM_RELUCTANT,
+  REGIONAL_BLOCK_PROVIDER_PRIORITY,
+} from '../engine/rules.js';
  
 export function getRoomBuilding(room) {
   return classifyRoom(room).building;
@@ -59,8 +68,7 @@ export function getRoomBuilding(room) {
 export function careTeamCompatible(buildingA, buildingB) {
   if (buildingA === buildingB) return 'yes';
   const combo = [buildingA, buildingB].sort().join('+');
-  if (combo.includes('BOOS'))               return 'no';
-  if (combo.includes('IR'))                 return 'no';
+  if (CARE_TEAM_LOCATION_HARD_AVOIDANCES.some(location => combo.includes(location))) return 'no';
   if (combo === 'ENDO_FLOOR+MAIN_OR_FLOOR') return 'yes';
   if (combo === 'CATH_FLOOR+MAIN_OR_FLOOR') return 'ok';
   if (combo === 'CATH_FLOOR+ENDO_FLOOR')    return 'ok';
@@ -74,9 +82,6 @@ export const CARE_TEAM_COMFORTABLE = [
   'Nielson, Mark', 'Lambert', 'Powell, Jason',
   'Pond, William', 'Dodwani', 'Fraley', 'Watkins',
 ];
- 
-export const CARE_TEAM_AVOID     = ['Eskew, Gregory S', 'Shepherd'];
-export const CARE_TEAM_RELUCTANT = ['DeWitt, Bracken J'];
  
 export const CARE_TEAM_TABLE = {
   0:  { careTeamRooms: 0,  mdsNeeded: 0, ratios: [],              floats: 0 },
@@ -100,9 +105,9 @@ export const CARE_TEAM_TABLE = {
 export function getCareTeamConfig(anesthetistCount) {
   if (anesthetistCount <= 0) return CARE_TEAM_TABLE[0];
   if (CARE_TEAM_TABLE[anesthetistCount]) return CARE_TEAM_TABLE[anesthetistCount];
-  const mdsNeeded = Math.floor(anesthetistCount / 3);
-  const remainder = anesthetistCount % 3;
-  const ratios    = Array(mdsNeeded).fill(3);
+  const mdsNeeded = Math.floor(anesthetistCount / CARE_TEAM_IDEAL_RATIO);
+  const remainder = anesthetistCount % CARE_TEAM_IDEAL_RATIO;
+  const ratios    = Array(mdsNeeded).fill(CARE_TEAM_IDEAL_RATIO);
   if (remainder > 0) ratios.push(remainder);
   return { careTeamRooms: anesthetistCount, mdsNeeded: ratios.length, ratios, floats: 0 };
 }
@@ -134,7 +139,7 @@ const PERIPHERAL_BLOCK_KEYWORDS = [
   'femoral nerve','fascia iliaca','infraclavicular','axillary block',
   'supraclavicular','wrist block','ankle block',
 ];
-const REGIONAL_CAPABLE = ['Nielson, Mark','Lambert','Powell, Jason','Pipito, Nicholas A','Dodwani','Pond, William'];
+const REGIONAL_CAPABLE = REGIONAL_BLOCK_PROVIDER_PRIORITY;
  
 function boosNeedsPeripheralBlock(room) {
   if (!room?.cases?.length) return room?.blockRequired || false;
@@ -210,7 +215,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     !globalUsed.has(p.name)
   );
  
-  const brandMD   = workingMDs.find(p => p.name === 'Brand, David L');
+  const brandMD   = workingMDs.find(p => p.name === BRAND_ENDO_PROVIDER);
   const careTeams = [];
   const usedMDs   = new Set([...globalUsed]);
   const usedAnesthetists = new Set([...globalUsed]);
@@ -328,7 +333,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
 
     const isReluctant = CARE_TEAM_RELUCTANT.includes(md.name);
     const isORCallCT  = orCallChoice?.type === 'careteam' && md.name === qg?.ORCall;
-    const maxRatio    = (isReluctant || isORCallCT) ? 2 : 3;  // OR Call on call all night → cap 1:2
+    const maxRatio    = (isReluctant || isORCallCT) ? 2 : CARE_TEAM_MAX_RATIO;  // OR Call on call all night → cap 1:2
     const targetRatio = Math.min(maxRatio, remainingAAs);
     const actualRatio = Math.min(targetRatio, roomPool.length);
     if (actualRatio < 2) break;

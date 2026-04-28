@@ -24,6 +24,7 @@
 //     unless they choose one" rule.
 // ─────────────────────────────────────────────────────────────
 import { SURGEON_BLOCKS } from '../data/surgeons.js';
+import { BRAND_ENDO_PROVIDER } from '../engine/rules.js';
  
 const EP_ANES_SURGEONS = ['Rose', 'Almnajam'];
 const NO_DEVICE_ANES_SURGEONS = ['Moran', 'Graham', 'Rivera Maza', 'Wagle', 'Saleb', 'Madmani'];
@@ -297,7 +298,7 @@ export function classifyCase(procedure, surgeon, room) {
  
   if (roomType.isEndo || ['colonoscopy','egd','eus','ercp','bronch','ebus'].some(k => proc.includes(k))) {
     caseType = 'endo';
-    preferredProviders.push('Brand, David L');
+    preferredProviders.push(BRAND_ENDO_PROVIDER);
   }
  
   if (roomType.isCathEP) {
@@ -308,7 +309,7 @@ export function classifyCase(procedure, surgeon, room) {
   if (roomType.isBOOS) {
     caseType = 'boos';
     preferredProviders.push('Pipito, Nicholas A', 'DeWitt, Bracken J');
-    avoidProviders.push('Eskew, Gregory S', 'Brand, David L');
+    avoidProviders.push('Eskew, Gregory S', BRAND_ENDO_PROVIDER);
     flags.push({ level: 'warn', msg: 'BOOS — Eskew avoids; Pipito or DeWitt preferred' });
   }
  
@@ -370,7 +371,7 @@ export function classifyCase(procedure, surgeon, room) {
  
   if (blockRequired) {
     preferredProviders.push('Nielson, Mark', 'Lambert', 'Powell, Jason', 'Pipito, Nicholas A');
-    avoidProviders.push('Siddiqui', 'Singh, Karampal', 'DeWitt, Bracken J', 'Raghove, Vikas', 'Raghove, Punam', 'Brand, David L', 'Fraley');
+    avoidProviders.push('Siddiqui', 'Singh, Karampal', 'DeWitt, Bracken J', 'Raghove, Vikas', 'Raghove, Punam', BRAND_ENDO_PROVIDER, 'Fraley');
     const isShoulder = proc.includes('shoulder') || proc.includes('rotator') || proc.includes('bicep tenodesis');
     const needsInterscalene = surgProfile?.blockTypes?.includes('interscalene') || isShoulder;
     const blockMsg = needsInterscalene
@@ -382,7 +383,7 @@ export function classifyCase(procedure, surgeon, room) {
   if (['tonsil','adenoid','myringotomy','ear tube','tympanostomy'].some(k => proc.includes(k))) {
     acuity = 'peds';
     preferredProviders.push('DeWitt, Bracken J', 'Pipito, Nicholas A');
-    avoidProviders.push('Raghove, Punam', 'Brand, David L', 'Fraley');
+    avoidProviders.push('Raghove, Punam', BRAND_ENDO_PROVIDER, 'Fraley');
     flags.push({ level: 'warn', msg: 'Peds — DeWitt or Pipito first' });
   }
  
@@ -403,7 +404,7 @@ export function classifyCase(procedure, surgeon, room) {
  
   if (['craniotomy','brain','aaa','aortic aneurysm','trauma','tracheostomy'].some(k => proc.includes(k))) {
     acuity = 'high';
-    avoidProviders.push('Raghove, Punam', 'Brand, David L', 'Fraley');
+    avoidProviders.push('Raghove, Punam', BRAND_ENDO_PROVIDER, 'Fraley');
     flags.push({ level: 'warn', msg: 'High acuity — experienced provider required' });
   }
  
