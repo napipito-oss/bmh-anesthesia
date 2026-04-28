@@ -372,7 +372,11 @@ export function classifyCase(procedure, surgeon, room) {
     preferredProviders.push('Nielson, Mark', 'Lambert', 'Powell, Jason', 'Pipito, Nicholas A');
     avoidProviders.push('Siddiqui', 'Singh, Karampal', 'DeWitt, Bracken J', 'Raghove, Vikas', 'Raghove, Punam', 'Brand, David L', 'Fraley');
     const isShoulder = proc.includes('shoulder') || proc.includes('rotator') || proc.includes('bicep tenodesis');
-    flags.push({ level: isShoulder ? 'critical' : 'warn', msg: `Block required${surgProfile?.blockTypes ? ` (${surgProfile.blockTypes.join(', ')})` : ''} — Nielson (1st), Lambert/Powell (2nd), Pipito (3rd)` });
+    const needsInterscalene = surgProfile?.blockTypes?.includes('interscalene') || isShoulder;
+    const blockMsg = needsInterscalene
+      ? `Interscalene required — Nielson (1st), Lambert (2nd), Pipito (3rd); Wu capable but not preferred`
+      : `Block required${surgProfile?.blockTypes ? ` (${surgProfile.blockTypes.join(', ')})` : ''} — Nielson (1st), Lambert (2nd), Pipito (3rd)`;
+    flags.push({ level: isShoulder ? 'critical' : 'warn', msg: blockMsg });
   }
  
   if (['tonsil','adenoid','myringotomy','ear tube','tympanostomy'].some(k => proc.includes(k))) {

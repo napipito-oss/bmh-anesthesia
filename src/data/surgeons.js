@@ -10,8 +10,9 @@ export const SURGEON_BLOCKS = {
   "Triplet": {
     specialty:"Ortho", blockRule:"always",
     blockCases:["shoulder","rotator cuff","complex hand","complex arm","arthroplasty"],
+    blockTypes:["interscalene"],
     neverBlock:[],
-    notes:"Blocks for ALL shoulder + complex hand/arm. Always assign block-capable provider."
+    notes:"Blocks for ALL shoulder + complex hand/arm. Interscalene required — Nielson (1st), Lambert (2nd), Pipito (3rd). Wu capable but not preferred."
   },
   "McPherron": {
     specialty:"Ortho", blockRule:"usually",
