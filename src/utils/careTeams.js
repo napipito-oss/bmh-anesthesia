@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────
-// CARE TEAM ENGINE — v3.7
+// CARE TEAM ENGINE — v3.8
 // v3.2:
 //   - unassignedRooms excludes isORCallChoice rooms
 //   - globalUsed includes OR Call choice provider
@@ -25,6 +25,18 @@
 //   - Endo MD fallback: if Brand is off/PTO, the next available MD in
 //     priority order covers endo. Without this, endo rooms and phantom
 //     Endo Add-On rooms were skipped entirely when Brand wasn't working.
+// v3.8 (block room guarantee):
+//   - Block-capable MDs now CLAIM block rooms explicitly before
+//     pickStaggeredRooms runs. Previously, pickStaggeredRooms re-sorted by
+//     start time and undid the block-first orderedPool ordering — OR 9
+//     (Triplet) was skipped if it started later than two other rooms, and
+//     Wu ended up with it instead of Lambert.
+//   - Explicit claim path: if jumpPair has a block room, take the pair;
+//     else claim the first block room, fill remaining slots via
+//     pickStaggeredRooms on non-block rooms. No-block fallback preserved.
+//   - Non-block MDs: block jump pairs are now explicitly excluded (they
+//     could only pick a non-block jump pair), preventing the edge case
+//     where a block jump pair was honored for a non-block MD.
 // v3.7 (priority ordering fixes):
 //   - Removed ctMDs global sort by REGIONAL_CAPABLE. That sort moved
 //     block-capable MDs (e.g. Pipito rank #5) ahead of higher-priority
@@ -321,34 +333,57 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     const actualRatio = Math.min(targetRatio, roomPool.length);
     if (actualRatio < 2) break;
 
-    // Jump rooms (same surgeon, 2 rooms with staggered times) should always land
-    // in the same care team — the natural time stagger lets one MD cover both.
-    // Block-capable MDs prefer jump pairs that contain block-required rooms.
+    // Block room assignment: block-capable MDs CLAIM block rooms explicitly before
+    // pickStaggeredRooms runs. pickStaggeredRooms re-sorts by start time, so any
+    // block-first ordering set in a pre-sorted pool gets undone — OR 9 (Triplet)
+    // would be skipped if it starts later than two other rooms Lambert could take.
+    // Claiming the block room first and filling remaining slots separately guarantees
+    // Nielson/Lambert/Pipito always get the block room regardless of start time.
+    //
+    // Non-block-capable MDs (Wu, Kuraganti, etc.) skip block rooms entirely when
+    // ≥2 non-block rooms are available, leaving block rooms for capable providers.
     const isBlockCapable = REGIONAL_CAPABLE.includes(md.name);
-    const jumpPair = findJumpPairInPool(roomPool, isBlockCapable);
+    const jumpPair       = findJumpPairInPool(roomPool, isBlockCapable);
+    const blockInPool    = roomPool.filter(r => r.blockRequired);
+    const nonBlockInPool = roomPool.filter(r => !r.blockRequired);
 
-    // Block-capable MDs get block rooms sorted to front so blocks land with the right MD.
-    let orderedPool;
-    if (jumpPair) {
-      const rest = roomPool.filter(r => !jumpPair.includes(r));
-      const restOrdered = isBlockCapable
-        ? [...rest.filter(r => r.blockRequired), ...rest.filter(r => !r.blockRequired)]
-        : rest;
-      orderedPool = [...jumpPair, ...restOrdered];
-    } else if (isBlockCapable) {
-      orderedPool = [...roomPool.filter(r => r.blockRequired), ...roomPool.filter(r => !r.blockRequired)];
+    let ctRooms;
+    if (isBlockCapable) {
+      if (jumpPair?.some(r => r.blockRequired)) {
+        // Jump pair includes a block room — claim the pair, fill remaining slots
+        const rest = roomPool.filter(r => !jumpPair.includes(r));
+        const filler = actualRatio > jumpPair.length
+          ? pickStaggeredRooms(rest, actualRatio - jumpPair.length) : [];
+        ctRooms = [...jumpPair, ...filler].slice(0, actualRatio);
+      } else if (blockInPool.length > 0) {
+        // Single block room (e.g. OR 9 / Triplet) — claim it, fill rest from non-block
+        const claimed = blockInPool.slice(0, 1);
+        const rest    = [...nonBlockInPool, ...blockInPool.slice(1)];
+        const filler  = pickStaggeredRooms(rest, actualRatio - 1);
+        ctRooms = [...claimed, ...filler];
+      } else if (jumpPair) {
+        // No block rooms — still honor non-block jump pair
+        const rest = roomPool.filter(r => !jumpPair.includes(r));
+        const filler = actualRatio > jumpPair.length
+          ? pickStaggeredRooms(rest, actualRatio - jumpPair.length) : [];
+        ctRooms = [...jumpPair, ...filler].slice(0, actualRatio);
+      } else {
+        ctRooms = pickStaggeredRooms(roomPool, actualRatio);
+      }
     } else {
-      orderedPool = roomPool;
+      // Non-block-capable MD: skip block rooms when ≥2 non-block rooms available
+      const pool = nonBlockInPool.length >= 2 ? nonBlockInPool : roomPool;
+      // Honor non-block jump pairs only (don't let non-block MDs claim a block jump pair)
+      const nbJump = jumpPair?.every(r => !r.blockRequired) ? jumpPair : null;
+      if (nbJump) {
+        const rest = pool.filter(r => !nbJump.includes(r));
+        const filler = actualRatio > nbJump.length
+          ? pickStaggeredRooms(rest, actualRatio - nbJump.length) : [];
+        ctRooms = [...nbJump, ...filler].slice(0, actualRatio);
+      } else {
+        ctRooms = pickStaggeredRooms(pool, actualRatio);
+      }
     }
-
-    // Non-block-capable MDs route around block rooms when >=2 non-block rooms exist.
-    // This keeps block rooms available for block-capable MDs without disrupting
-    // priority ordering (locums → backup call → ranked MDs).
-    if (!isBlockCapable) {
-      const nonBlock = orderedPool.filter(r => !r.blockRequired);
-      if (nonBlock.length >= 2) orderedPool = nonBlock;
-    }
-    const ctRooms = pickStaggeredRooms(orderedPool, actualRatio);
     if (ctRooms.length < 2) break;
 
     ctRooms.forEach(r => { roomPool = roomPool.filter(x => x.room !== r.room); });
