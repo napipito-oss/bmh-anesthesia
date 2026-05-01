@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { PROVIDERS, ANESTHETIST_SHIFTS, LATE_STAY_PRIORITY } from './data/providers.js';
 import { SURGEON_BLOCKS } from './data/surgeons.js';
-import { parseQGenda, parseCubeData, buildAssignments } from './utils/parsers.js';
+import { parseQGenda, parseCubeData } from './utils/parsers.js';
 import { CARE_TEAM_COLORS } from './utils/careTeams.js';
 import { buildDailyAssignments } from './engine/assignmentEngine.js';
 import { getAnesthetistLocationCounts, saveFullDayHistory, saveCCSchedule } from './utils/history.js';
@@ -9,6 +9,7 @@ import { saveORCallChoice, getORCallPrediction } from './utils/orCallTracker.js'
 import { callAI } from './utils/api.js';
 import HistoryTab from './components/HistoryTab.jsx';
 import ORCallPrompt from './components/ORCallPrompt.jsx';
+import AssignmentReview from './components/AssignmentReview.jsx';
 import './App.css';
 
 // ── OR.endo.CCL week parser ───────────────────────────────────────
@@ -109,6 +110,7 @@ const STATUS_COLORS = {
 const TABS = [
   { id: 'board',     label: 'DAILY BOARD' },
   { id: 'assign',    label: 'ASSIGNMENTS' },
+  { id: 'review',    label: 'ASSIGNMENT REVIEW' },
   { id: 'handoff',   label: '2PM HANDOFF' },
   { id: 'providers', label: 'PROVIDER INTEL' },
   { id: 'surgeons',  label: 'SURGEON DB' },
@@ -126,6 +128,255 @@ const QUICK_PROMPTS = [
   "We're short a backup CV provider today — what's the plan?",
   "Which anesthetists need relief first this afternoon?",
 ];
+
+const OVERRIDE_REASONS = [
+  'physician preference',
+  'staffing limitation',
+  'provider request',
+  'workload balancing',
+  'late schedule change',
+  'manual judgment',
+  'other',
+];
+
+const COVERAGE_KEYS = ['mainOR', 'endo', 'cath', 'boos', 'ir'];
+const REVIEWED_DISCREPANCY_KEYS = ['mainOR', 'endo', 'cath', 'boos'];
+const RESOLVED_OBLIGATION_STORAGE_KEY = 'bmh.resolvedOperationalObligations.v1';
+
+const COVERAGE_LABELS = {
+  mainOR: 'Main OR',
+  endo: 'Endo',
+  cath: 'Cath',
+  boos: 'BOOS',
+  ir: 'IR',
+};
+
+function committedValue(value) {
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? Math.ceil(n) : undefined;
+}
+
+function buildCommittedObligations(resourceStructure) {
+  return {
+    mainOR: committedValue(resourceStructure.mainOR),
+    endo: committedValue(resourceStructure.endo),
+    cath: committedValue(resourceStructure.cath),
+    boos: committedValue(resourceStructure.boos),
+    ir: committedValue(resourceStructure.ir),
+  };
+}
+
+function obligationsToResourceStructure(values = {}) {
+  return Object.fromEntries(
+    COVERAGE_KEYS.map(key => [key, typeof values[key] === 'number' ? String(values[key]) : ''])
+  );
+}
+
+function buildCubeVisibilityCounts(rooms = []) {
+  return {
+    mainOR: rooms.filter(r => r.building === 'MAIN_OR_FLOOR' && !r.isEndo && !r.isCathEP && !r.isBOOS && !r.isIR).length,
+    endo: rooms.filter(r => r.isEndo).length,
+    cath: rooms.filter(r => r.isCathEP).length,
+    boos: rooms.filter(r => r.isBOOS).length,
+    ir: rooms.filter(r => r.isIR).length,
+  };
+}
+
+function buildResolutionSignature(date, rawObligations, cubeVisibility) {
+  return JSON.stringify({ date, rawObligations, cubeVisibility });
+}
+
+function buildOperationalDiscrepancies(rawObligations, cubeVisibility) {
+  return REVIEWED_DISCREPANCY_KEYS.map(key => {
+    const obligated = rawObligations[key];
+    if (typeof obligated !== 'number' || obligated < 0) return null;
+
+    const visible = cubeVisibility[key] || 0;
+    const difference = Math.abs(visible - obligated);
+    if (difference === 0) return null;
+
+    let level = 'info';
+    let requiresConfirmation = false;
+    let interpretation = 'Cube procedural visibility differs from OR.Endo.CCL staffing obligation.';
+
+    if (key === 'mainOR') {
+      if (difference <= 1) {
+        interpretation = 'Likely open-heart, add-on reserve, or expected consolidation behavior.';
+      } else if (difference === 2) {
+        level = 'warn';
+        interpretation = 'Mild Main OR mismatch; likely placeholder or consolidation issue.';
+      } else {
+        level = 'critical';
+        requiresConfirmation = true;
+        interpretation = 'Large Main OR mismatch; confirm intended anesthesia staffing obligation before assignment.';
+      }
+    } else if (key === 'endo' || key === 'cath') {
+      const zeroVisibilityWithObligation = obligated > 0 && visible === 0;
+      const majorMismatch = zeroVisibilityWithObligation || difference >= 2;
+      level = majorMismatch ? 'critical' : 'warn';
+      requiresConfirmation = majorMismatch;
+      interpretation = zeroVisibilityWithObligation
+        ? `${COVERAGE_LABELS[key]} obligation exists but Cube shows no anesthesia-relevant procedural visibility.`
+        : `${COVERAGE_LABELS[key]} procedural visibility differs from staffing obligation; confirm if this is expected.`;
+    } else if (key === 'boos') {
+      const majorMismatch = obligated > 0 && visible === 0;
+      level = majorMismatch ? 'critical' : 'warn';
+      requiresConfirmation = majorMismatch;
+      interpretation = majorMismatch
+        ? 'BOOS obligation exists but Cube shows no BOOS procedural visibility.'
+        : 'BOOS visibility differs from staffing obligation; confirm if this is expected.';
+    }
+
+    return {
+      source: 'operational-discrepancy-arbitration',
+      area: COVERAGE_LABELS[key],
+      key,
+      obligated,
+      visible,
+      difference,
+      level,
+      requiresConfirmation,
+      suggestedCount: obligated,
+      interpretation,
+      msg: `${COVERAGE_LABELS[key]}: OR.Endo.CCL shows ${obligated}, Cube shows ${visible}. ${interpretation}`,
+    };
+  }).filter(Boolean);
+}
+
+function buildResolvedOperationalObligations({ values, source, rawObligations, cubeVisibility, discrepancies = [], date }) {
+  return {
+    version: 1,
+    source,
+    date,
+    rawObligations: { ...rawObligations },
+    cubeVisibility: { ...cubeVisibility },
+    values: { ...values },
+    discrepancies,
+    inputSignature: buildResolutionSignature(date, rawObligations, cubeVisibility),
+    confirmedAt: new Date().toISOString(),
+  };
+}
+
+function readResolvedObligationStore() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(RESOLVED_OBLIGATION_STORAGE_KEY) || '');
+    return parsed?.version === 1 && parsed.byDate ? parsed : { version: 1, byDate: {} };
+  } catch {
+    return { version: 1, byDate: {} };
+  }
+}
+
+function writeResolvedObligations(date, resolved) {
+  if (!date || !resolved) return;
+  const store = readResolvedObligationStore();
+  store.byDate[date] = resolved;
+  localStorage.setItem(RESOLVED_OBLIGATION_STORAGE_KEY, JSON.stringify(store, null, 2));
+}
+
+function roomIdentity(room) {
+  return room?.generatedRoomId || room?.room || '';
+}
+
+function buildManualOverride(room, provider, reason = 'manual judgment') {
+  const originalProvider = room.manualOverride?.originalProvider ?? room.assignedProvider ?? '';
+  if ((provider || '') === (originalProvider || '')) return null;
+
+  const fromLabel = originalProvider || 'unassigned';
+  const toLabel = provider || 'unassigned';
+  return {
+    originalProvider,
+    newProvider: provider || '',
+    reason,
+    note: `Manual change from ${fromLabel} to ${toLabel}; reason: ${reason}.`,
+  };
+}
+
+function applyManualAssignment(room, provider, reason = room.manualOverride?.reason || 'manual judgment') {
+  const manualOverride = buildManualOverride(room, provider, reason);
+  const next = { ...room, assignedProvider: provider };
+  if (room.isPhantom && provider) {
+    next.assignmentExplanation = {
+      primaryReason: 'Add-on reserve attending assignment',
+      doctrineCategory: 'operational_requirement',
+      assignmentType: 'standard',
+      note: 'Attending assigned to operational reserve capacity; anesthetist is not required until procedural staffing is needed.',
+    };
+    const reserveNote = 'Add-on reserve has an attending assignment for operational coverage comparison.';
+    next.assignmentReviewNotes = [
+      ...(room.assignmentReviewNotes || []).filter(note => note.note !== reserveNote),
+      { category: 'informational', note: reserveNote },
+    ];
+  } else if (room.isPhantom && !provider) {
+    delete next.assignmentExplanation;
+    next.assignmentReviewNotes = (room.assignmentReviewNotes || []).filter(note =>
+      note.note !== 'Add-on reserve has an attending assignment for operational coverage comparison.'
+    );
+  }
+  if (manualOverride) return { ...next, manualOverride };
+  const { manualOverride: _manualOverride, ...withoutOverride } = next;
+  return withoutOverride;
+}
+
+function buildAssignmentConfidenceSummary(rooms = [], coverageGaps = []) {
+  const assignedRooms = rooms.filter(room => room.assignedProvider);
+  const alternateAssignments = assignedRooms.filter(room => room.protectedExpertise?.alternateRequired);
+  const protectedRooms = assignedRooms.filter(room => room.protectedExpertise?.qualified);
+  const manualOverrides = assignedRooms.filter(room => room.manualOverride);
+  const reviewSuggested = assignedRooms.filter(room =>
+    (room.assignmentReviewNotes || []).some(note => note.category === 'review suggested')
+  );
+  const attentionNotes = assignedRooms.filter(room =>
+    (room.assignmentReviewNotes || []).some(note => note.category === 'attention')
+  );
+  const reconciliationDiscrepancies = coverageGaps.filter(gap =>
+    gap.source === 'room-obligation-reconciliation' && gap.level !== 'info'
+  );
+  const specializedDepthNotes = assignedRooms.filter(room =>
+    (room.careTeamDoctrineClassifications || []).some(item =>
+      item.code === 'preserve_specialized_coverage_depth'
+    )
+  );
+
+  const statements = [];
+  if (!assignedRooms.length) {
+    statements.push({ category: 'informational', text: 'No generated assignments are available yet.' });
+  } else if (!alternateAssignments.length && !manualOverrides.length && !reviewSuggested.length && !reconciliationDiscrepancies.length) {
+    statements.push({ category: 'informational', text: 'Mostly standard assignment pathways were used.' });
+  } else {
+    statements.push({ category: 'informational', text: 'Assignment pathways are generated and ready for scheduler review.' });
+  }
+
+  if (protectedRooms.length && !alternateAssignments.length) {
+    statements.push({ category: 'informational', text: 'Protected regional coverage was preserved through the preferred pathway.' });
+  }
+  if (alternateAssignments.length) {
+    statements.push({ category: 'attention', text: 'A few alternate-qualified assignments were needed.' });
+  }
+  if (specializedDepthNotes.length || attentionNotes.length) {
+    statements.push({ category: 'attention', text: 'Regional or specialized coverage depth may be thinner than usual today.' });
+  }
+  if (manualOverrides.length) {
+    statements.push({
+      category: manualOverrides.length > 2 ? 'review suggested' : 'attention',
+      text: manualOverrides.length > 2 ? 'Several manual adjustments have been applied.' : 'A manual adjustment has been applied.',
+    });
+  }
+  if (reviewSuggested.length || reconciliationDiscrepancies.length) {
+    statements.push({ category: 'review suggested', text: 'Assignment plan may benefit from review before final use.' });
+  }
+
+  return {
+    statements,
+    hasReviewSuggested: statements.some(item => item.category === 'review suggested'),
+    generatedFrom: [
+      'protected-expertise usage',
+      'alternate-qualified assignments',
+      'override activity',
+      'assignment review notes',
+      'reconciliation discrepancies',
+    ],
+  };
+}
 
 export default function App() {
   const [tab, setTab] = useState('board');
@@ -150,14 +401,6 @@ export default function App() {
   const [dragSourceRoom, setDragSourceRoom] = useState(null);
   const [dragOverRoom, setDragOverRoom] = useState(null);
 
-  const loadQG = useCallback(() => {
-    const parsed = parseQGenda(qgRaw, selectedDate);
-    if (!parsed) return;
-    setQg(parsed);
-    setQgLoaded(true);
-    if (rooms.length) setRooms(buildAssignments(rooms, parsed));
-  }, [qgRaw, rooms, selectedDate]);
-
   const [dateMismatch, setDateMismatch] = useState(false);
   const [careTeamResult, setCareTeamResult] = useState(null);
   const [showORCallPrompt, setShowORCallPrompt] = useState(false);
@@ -174,6 +417,8 @@ export default function App() {
   const [resourceBypassed, setResourceBypassed] = useState(false);
   const [coverageGaps, setCoverageGaps] = useState([]);
   const [fractionalPairs, setFractionalPairs] = useState([]);
+  const [discrepancyReview, setDiscrepancyReview] = useState(null);
+  const [resolvedOperationalObligations, setResolvedOperationalObligations] = useState(null);
 
   const stepsUnlocked = resourceLoaded || resourceBypassed;
 
@@ -181,17 +426,45 @@ export default function App() {
   useEffect(() => {
     if (!selectedDate || !Object.keys(cclWeekData).length) return;
     const found = cclWeekData[isoToMDY(selectedDate)];
-    if (found) setResourceStructure(found);
+    if (found) {
+      resolvedOperationalObligationsRef.current = null;
+      setResolvedOperationalObligations(null);
+      setResourceStructure(found);
+    }
   }, [selectedDate, cclWeekData]);
 
   const finishRef = useRef(null);
+  const resolvedOperationalObligationsRef = useRef(null);
+
+  useEffect(() => {
+    if (!selectedDate) {
+      resolvedOperationalObligationsRef.current = null;
+      setResolvedOperationalObligations(null);
+      return;
+    }
+    const stored = readResolvedObligationStore().byDate?.[selectedDate] || null;
+    resolvedOperationalObligationsRef.current = stored;
+    setResolvedOperationalObligations(stored);
+  }, [selectedDate]);
+
+  const commitResolvedOperationalObligations = useCallback((resolved) => {
+    resolvedOperationalObligationsRef.current = resolved;
+    setResolvedOperationalObligations(resolved);
+    if (selectedDate) writeResolvedObligations(selectedDate, resolved);
+  }, [selectedDate]);
 
   const finishBuildingSchedule = useCallback((roomsIn, orChoice) => {
     const history  = getAnesthetistLocationCounts();
+    // Resolved obligations are the final staffing-generation authority after
+    // operational arbitration. Raw OR.Endo.CCL is used only until arbitration
+    // confirms or adjusts the intended staffing counts.
+    const effectiveResourceStructure = resolvedOperationalObligationsRef.current
+      ? obligationsToResourceStructure(resolvedOperationalObligationsRef.current.values)
+      : resourceStructure;
     const { roomPairs: generatedRoomPairs, ...ctResult } = buildDailyAssignments({
       rooms: roomsIn,
       qg,
-      resourceStructure,
+      resourceStructure: effectiveResourceStructure,
       orCallChoice: orChoice,
       anesthetistHistory: history,
       fractionalPairs,
@@ -205,7 +478,7 @@ export default function App() {
     // once the full scheduling logic ran (e.g. "Available" but rooms
     // went uncovered, or "Care Team" but no team slot was left).
     if (orChoice && qg?.ORCall) {
-      const unassigned = (ctResult.rooms || []).filter(r => !r.assignedProvider && !r.isPhantom);
+      const unassigned = (ctResult.rooms || []).filter(r => !r.assignedProvider && !r.isPhantom && !r.staffingExcluded);
       if (orChoice.type === 'available' && unassigned.length > 0) {
         setOrCallWarning(
           `⚠ OR Call (${qg.ORCall}) is set to Available, but ${unassigned.length} room${unassigned.length !== 1 ? 's' : ''} ` +
@@ -236,20 +509,49 @@ export default function App() {
 
   finishRef.current = finishBuildingSchedule;
 
-  const loadSchedule = useCallback(() => {
-    // Pass committed room counts from OR.endo.CCL:
-    //  - Main OR: trims excess rooms if cube exceeds committed
-    //  - Cath: generates Cath Lab Add-On phantom rooms if committed > cube visible
-    // Undefined is passed for any value that is 0/empty (Step 1 bypassed etc.)
-    const mainORCommitted = parseFloat(resourceStructure.mainOR) || 0;
-    const cathCommitted   = parseFloat(resourceStructure.cath)   || 0;
-    const parsed = parseCubeData(
-      cubeRaw,
-      selectedDate,
-      mainORCommitted > 0 ? Math.ceil(mainORCommitted) : undefined,
-      cathCommitted   > 0 ? Math.ceil(cathCommitted)   : undefined
-    );
+  const loadQG = useCallback(() => {
+    const parsed = parseQGenda(qgRaw, selectedDate);
+    if (!parsed) return;
+    setQg(parsed);
+    setQgLoaded(true);
+    if (rooms.length) {
+      const history = getAnesthetistLocationCounts();
+      const effectiveResourceStructure = resolvedOperationalObligationsRef.current
+        ? obligationsToResourceStructure(resolvedOperationalObligationsRef.current.values)
+        : resourceStructure;
+      const { roomPairs: generatedRoomPairs, ...ctResult } = buildDailyAssignments({
+        rooms,
+        qg: parsed,
+        resourceStructure: effectiveResourceStructure,
+        orCallChoice,
+        anesthetistHistory: history,
+        fractionalPairs,
+      });
+      setRooms(ctResult.rooms);
+      setCareTeamResult(ctResult);
+      if (fractionalPairs.length > 0) setRoomPairs(generatedRoomPairs);
+    }
+  }, [fractionalPairs, orCallChoice, qgRaw, resourceStructure, rooms, selectedDate]);
+
+  const applyParsedSchedule = useCallback((parsed) => {
     setDateMismatch(selectedDate && parsed.totalParsed === 0);
+    const discrepancyNotes = (resolvedOperationalObligationsRef.current?.discrepancies || parsed.operationalDiscrepancies || []).map(item => ({
+      source: 'operational-discrepancy-arbitration',
+      area: item.area,
+      needed: item.obligated,
+      booked: item.visible,
+      level: item.level,
+      msg: item.msg,
+    }));
+    const reconciliationNotes = parsed.reconciliationWarnings || [];
+    const nextGaps = [...discrepancyNotes, ...reconciliationNotes];
+    setCoverageGaps(prev => [
+      ...prev.filter(g =>
+        g.source !== 'room-obligation-reconciliation' &&
+        g.source !== 'operational-discrepancy-arbitration'
+      ),
+      ...nextGaps,
+    ]);
     setPendingRooms(parsed.rooms);
     setSchedLoaded(true);
     if (qg?.ORCall && parsed.rooms.length > 0) {
@@ -257,7 +559,74 @@ export default function App() {
     } else {
       finishRef.current(parsed.rooms, null);
     }
-  }, [cubeRaw, qg, selectedDate, resourceStructure.mainOR, resourceStructure.cath]);
+  }, [qg, selectedDate]);
+
+  const parseScheduleWithResolvedObligations = useCallback((resolvedObligations) => {
+    const values = resolvedObligations?.values || {};
+    // Pipeline stage 6: room generation consumes resolved obligations only.
+    // Raw CCL and raw Cube visibility are never used directly after arbitration.
+    return parseCubeData(
+    cubeRaw,
+    selectedDate,
+    values.mainOR,
+    values.cath,
+    values.endo,
+    values.boos,
+    values.ir
+    );
+  }, [cubeRaw, selectedDate]);
+
+  const loadSchedule = useCallback(() => {
+    // Staffing-resolution pipeline:
+    // raw OR.Endo.CCL -> raw Cube visibility -> discrepancy detection ->
+    // operational arbitration -> resolved obligations -> room generation.
+    const existingResolved = resolvedOperationalObligationsRef.current;
+    const rawObligations = buildCommittedObligations(resourceStructure);
+    const visibilityParsed = parseCubeData(cubeRaw, selectedDate);
+    const cubeVisibility = buildCubeVisibilityCounts(visibilityParsed.rooms);
+    const inputSignature = buildResolutionSignature(selectedDate, rawObligations, cubeVisibility);
+    const existingResolvedMatches = existingResolved?.inputSignature === inputSignature;
+    const discrepancies = buildOperationalDiscrepancies(rawObligations, cubeVisibility);
+    const requiresReview = discrepancies.filter(item => item.requiresConfirmation);
+
+    if (!existingResolvedMatches && requiresReview.length > 0) {
+      setDiscrepancyReview({
+        discrepancies,
+        rawObligations: { ...rawObligations },
+        cubeVisibility: { ...cubeVisibility },
+        counts: Object.fromEntries(
+          discrepancies.map(item => [item.key, String(item.suggestedCount ?? item.obligated ?? 0)])
+        ),
+      });
+      setDateMismatch(selectedDate && visibilityParsed.totalParsed === 0);
+      setCoverageGaps(prev => [
+        ...prev.filter(g => g.source !== 'operational-discrepancy-arbitration'),
+        ...discrepancies.map(item => ({
+          source: 'operational-discrepancy-arbitration',
+          area: item.area,
+          needed: item.obligated,
+          booked: item.visible,
+          level: item.level,
+          msg: item.msg,
+        })),
+      ]);
+      return;
+    }
+    const resolved = existingResolvedMatches
+      ? existingResolved
+      : buildResolvedOperationalObligations({
+          values: rawObligations,
+          source: 'or-endo-ccl',
+          rawObligations,
+          cubeVisibility,
+          discrepancies,
+          date: selectedDate,
+        });
+    if (!existingResolvedMatches) commitResolvedOperationalObligations(resolved);
+    const parsed = parseScheduleWithResolvedObligations(resolved);
+    setDiscrepancyReview(null);
+    applyParsedSchedule(parsed);
+  }, [applyParsedSchedule, commitResolvedOperationalObligations, cubeRaw, parseScheduleWithResolvedObligations, resourceStructure, selectedDate]);
 
   const handleORCallConfirm = useCallback((choice) => {
     setShowORCallPrompt(false);
@@ -269,6 +638,37 @@ export default function App() {
     setShowORCallPrompt(false);
     finishRef.current(pendingRooms, null);
   }, [pendingRooms]);
+
+  const updateDiscrepancyCount = useCallback((key, value) => {
+    setDiscrepancyReview(prev => prev ? {
+      ...prev,
+      counts: { ...prev.counts, [key]: value },
+    } : prev);
+  }, []);
+
+  const confirmDiscrepancyReview = useCallback(() => {
+    if (!discrepancyReview) return;
+    const confirmedObligations = { ...discrepancyReview.rawObligations };
+    for (const key of COVERAGE_KEYS) {
+      if (!(key in (discrepancyReview.counts || {}))) continue;
+      const n = parseFloat(discrepancyReview.counts[key]);
+      if (Number.isFinite(n) && n >= 0) confirmedObligations[key] = Math.ceil(n);
+    }
+    const confirmedFields = obligationsToResourceStructure(confirmedObligations);
+    const resolved = buildResolvedOperationalObligations({
+      values: confirmedObligations,
+      source: 'operational-arbitration',
+      rawObligations: discrepancyReview.rawObligations,
+      cubeVisibility: discrepancyReview.cubeVisibility,
+      discrepancies: discrepancyReview.discrepancies || [],
+      date: selectedDate,
+    });
+    commitResolvedOperationalObligations(resolved);
+    setResourceStructure(prev => ({ ...prev, ...confirmedFields }));
+    const parsed = parseScheduleWithResolvedObligations(resolved);
+    setDiscrepancyReview(null);
+    applyParsedSchedule(parsed);
+  }, [applyParsedSchedule, commitResolvedOperationalObligations, discrepancyReview, parseScheduleWithResolvedObligations, selectedDate]);
 
   const loadResourceStructure = useCallback((currentRooms) => {
     const rs     = resourceStructure;
@@ -303,16 +703,31 @@ export default function App() {
     setResourceLoaded(true);
   }, [resourceStructure, rooms]);
 
-  const updateAssignment = useCallback((roomName, provider) => {
+  const updateAssignment = useCallback((roomKey, provider) => {
     setRooms(prev => {
-      const pairedRoom = roomPairs[roomName];
+      const pairedRoom = roomPairs[roomKey];
       return prev.map(r => {
-        if (r.room === roomName) return { ...r, assignedProvider: provider };
-        if (pairedRoom && r.room === pairedRoom) return { ...r, assignedProvider: provider };
+        const key = roomIdentity(r);
+        if (key === roomKey) return applyManualAssignment(r, provider);
+        if (pairedRoom && key === pairedRoom) return applyManualAssignment(r, provider, 'workload balancing');
         return r;
       });
     });
   }, [roomPairs]);
+
+  const updateOverrideReason = useCallback((roomKey, reason) => {
+    setRooms(prev => prev.map(r => {
+      if (roomIdentity(r) !== roomKey || !r.manualOverride) return r;
+      return {
+        ...r,
+        manualOverride: {
+          ...r.manualOverride,
+          reason,
+          note: `Manual change from ${r.manualOverride.originalProvider || 'unassigned'} to ${r.assignedProvider || 'unassigned'}; reason: ${reason}.`,
+        },
+      };
+    }));
+  }, []);
 
   const createPair = useCallback((roomA, roomB) => {
     if (roomA === roomB) return;
@@ -324,9 +739,9 @@ export default function App() {
       return next;
     });
     setRooms(prev => {
-      const sourceRoom = prev.find(r => r.room === roomA);
+      const sourceRoom = prev.find(r => roomIdentity(r) === roomA);
       if (!sourceRoom?.assignedProvider) return prev;
-      return prev.map(r => r.room === roomB ? { ...r, assignedProvider: sourceRoom.assignedProvider } : r);
+      return prev.map(r => roomIdentity(r) === roomB ? applyManualAssignment(r, sourceRoom.assignedProvider, 'workload balancing') : r);
     });
   }, []);
 
@@ -404,7 +819,69 @@ export default function App() {
     setResourceLoaded(false); setResourceBypassed(false);
     setCoverageGaps([]); setFractionalPairs([]); setRoomPairs({});
     setOrCallWarning('');
+    resolvedOperationalObligationsRef.current = null;
+    setResolvedOperationalObligations(null);
   };
+
+  const getPhantomSource = (room) => {
+    if (room.roomState === 'Add-On Reserve') return 'parser reconciliation';
+    if (room.isPhantom && (room.isCareTeam || room.careTeamLabel)) return 'careTeams';
+    return 'unknown';
+  };
+
+  const effectiveObligations = resolvedOperationalObligations?.values || buildCommittedObligations(resourceStructure);
+
+  const reconciliationDiagnostics = [
+    {
+      label: 'Main OR',
+      obligation: effectiveObligations.mainOR || 0,
+      matches: room => room.building === 'MAIN_OR_FLOOR' && !room.isEndo && !room.isCathEP && !room.isBOOS && !room.isIR,
+    },
+    {
+      label: 'Endo',
+      obligation: effectiveObligations.endo || 0,
+      matches: room => room.isEndo || room.building === 'ENDO_FLOOR',
+    },
+    {
+      label: 'Cath',
+      obligation: effectiveObligations.cath || 0,
+      matches: room => room.isCathEP || room.building === 'CATH_FLOOR',
+    },
+  ].map(area => {
+    const areaRooms = rooms.filter(area.matches);
+    const cubeVisibleCount = areaRooms.filter(room => !room.isPhantom).length;
+    const phantomRooms = areaRooms.filter(room => room.isPhantom);
+    const parserReserveCount = phantomRooms.filter(room => getPhantomSource(room) === 'parser reconciliation').length;
+    const warnings = coverageGaps.filter(gap =>
+      gap.source === 'room-obligation-reconciliation' && gap.area === area.label
+    );
+
+    return {
+      ...area,
+      cubeVisibleCount,
+      reserveCreated: parserReserveCount > 0,
+      excessCubeCount: Math.max(0, cubeVisibleCount - area.obligation),
+      remainingDeficit: Math.max(0, area.obligation - cubeVisibleCount - parserReserveCount),
+      phantomRooms: phantomRooms.map(room => ({
+        name: room.room,
+        source: getPhantomSource(room),
+      })),
+      warnings,
+    };
+  });
+
+  const protectedExpertiseAuditRows = rooms
+    .filter(room => room.protectedExpertiseReserved || room.protectedExpertise?.qualified)
+    .map(room => ({
+      room: room.room,
+      reasons: room.protectedExpertise?.reasons || [],
+      reservedProvider: room.protectedExpertise?.reservedProvider || room.assignedProvider || '',
+      pathway: room.protectedExpertise?.pathway || 'Preferred',
+      alternateRequired: !!room.protectedExpertise?.alternateRequired,
+      note: room.protectedExpertise?.note || 'Protected regional expertise preserved before generic care-team formation',
+    }));
+
+  const assignmentConfidenceSummary = buildAssignmentConfidenceSummary(rooms, coverageGaps);
 
   return (
     <div className="app">
@@ -505,6 +982,8 @@ export default function App() {
                   <textarea className="textarea" rows={4} value={cclRaw}
                     onChange={e => {
                       setCclRaw(e.target.value);
+                      resolvedOperationalObligationsRef.current = null;
+                      setResolvedOperationalObligations(null);
                       const parsed = parseORCCLWeek(e.target.value);
                       setCclWeekData(parsed);
                       if (selectedDate) {
@@ -526,7 +1005,11 @@ export default function App() {
                         <div style={{fontSize:'10px',color:'var(--text-muted)',fontWeight:'700',letterSpacing:'1px',marginBottom:'3px'}}>{label}</div>
                         <input type="number" min="0" max="15" step="0.5"
                           value={resourceStructure[key]}
-                          onChange={e => setResourceStructure(prev => ({ ...prev, [key]: e.target.value }))}
+                          onChange={e => {
+                            resolvedOperationalObligationsRef.current = null;
+                            setResolvedOperationalObligations(null);
+                            setResourceStructure(prev => ({ ...prev, [key]: e.target.value }));
+                          }}
                           placeholder="0" disabled={!selectedDate}
                           style={{width:'100%',background:'#fff',border:'1.5px solid var(--border)',borderRadius:'var(--radius-sm)',color:'var(--text-primary)',padding:'6px 10px',fontSize:'14px',fontFamily:'var(--font-mono)',fontWeight:'700',outline:'none',textAlign:'center',opacity:selectedDate?1:0.5}}
                         />
@@ -563,12 +1046,13 @@ export default function App() {
                     </div>
                   )}
                   {(() => {
-                    const total = (parseFloat(resourceStructure.mainOR)||0)+(parseFloat(resourceStructure.endo)||0)+(parseFloat(resourceStructure.cath)||0)+(parseFloat(resourceStructure.boos)||0)+(parseFloat(resourceStructure.ir)||0);
+                    const summaryObligations = resolvedOperationalObligations?.values || buildCommittedObligations(resourceStructure);
+                    const total = COVERAGE_KEYS.reduce((sum, key) => sum + (summaryObligations[key] || 0), 0);
                     const mds = qg?.workingMDs?.length||0;
                     const aas = qg?.Anesthetists?.filter(a=>!a.isAdmin&&!a.isOff).length||0;
                     return total>0?(
                       <div style={{background:'var(--bg-surface)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'10px 12px',marginTop:'8px'}}>
-                        <div style={{fontSize:'10px',color:'var(--accent-blue)',letterSpacing:'2px',marginBottom:'6px'}}>STAFFING SUMMARY</div>
+                        <div style={{fontSize:'10px',color:'var(--accent-blue)',letterSpacing:'2px',marginBottom:'6px'}}>STAFFING SUMMARY{resolvedOperationalObligations ? ' - RESOLVED' : ''}</div>
                         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',textAlign:'center'}}>
                           <div><div style={{fontSize:'18px',color:'var(--text-primary)',fontWeight:'600'}}>{total}</div><div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>COMMITTED</div></div>
                           <div><div style={{fontSize:'18px',color:'var(--accent-blue)',fontWeight:'600'}}>{mds}</div><div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px'}}>MDs</div></div>
@@ -659,7 +1143,11 @@ export default function App() {
               <div className="card">
                 <div className="card-hint" style={{marginBottom:'8px'}}>Paste any days of cube data — a single day, a week, whatever you have. The app extracts cases for the selected date only.</div>
                 {!stepsUnlocked && <div className="flag-warn" style={{marginBottom:'8px'}}>⚠ Confirm or bypass Step 1 first</div>}
-                <textarea className="textarea" value={cubeRaw} onChange={e=>setCubeRaw(e.target.value)}
+                <textarea className="textarea" value={cubeRaw} onChange={e=>{
+                  resolvedOperationalObligationsRef.current = null;
+                  setResolvedOperationalObligations(null);
+                  setCubeRaw(e.target.value);
+                }}
                   placeholder={"Paste cube schedule here — any date range.\n\nBMH OR\n4/14/2026 7:30 AM\tBMHOR-2026-701\tBMH OR 10\t..."}
                   disabled={!stepsUnlocked} style={{opacity:stepsUnlocked?1:0.4}} />
                 {cubeRaw && boardCubeDates.length > 0 && (
@@ -671,6 +1159,37 @@ export default function App() {
                 )}
                 <button className="btn" onClick={loadSchedule} style={{marginTop:'8px',opacity:stepsUnlocked?1:0.4}} disabled={!stepsUnlocked}>LOAD SCHEDULE</button>
               </div>
+              {discrepancyReview && (
+                <div style={{marginTop:'12px',background:'#fffbeb',border:'1.5px solid #d97706',borderRadius:'var(--radius)',padding:'10px 12px'}}>
+                  <div style={{fontSize:'10px',color:'#92400e',letterSpacing:'1px',fontWeight:'800',marginBottom:'6px'}}>OPERATIONAL DISCREPANCY REVIEW</div>
+                  <div style={{fontSize:'11px',color:'var(--text-secondary)',lineHeight:1.5,marginBottom:'8px'}}>
+                    OR.Endo.CCL is the staffing obligation source. Cube is procedural visibility only. Confirm the intended staffing count before assignments are generated.
+                  </div>
+                  {discrepancyReview.discrepancies.map(item => (
+                    <div key={item.key} className={item.requiresConfirmation ? 'flag-crit' : item.level === 'warn' ? 'flag-warn' : 'flag-info'} style={{marginBottom:'8px'}}>
+                      <div style={{display:'grid',gridTemplateColumns:'1fr 86px',gap:'10px',alignItems:'center'}}>
+                        <div>
+                          <div style={{fontSize:'10px',fontWeight:'800',letterSpacing:'1px',marginBottom:'3px'}}>{item.area}</div>
+                          <div>{item.msg}</div>
+                        </div>
+                        <div>
+                          <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',fontWeight:'700',marginBottom:'3px'}}>CONFIRM</div>
+                          <input type="number" min="0" max="15" step="1"
+                            value={discrepancyReview.counts[item.key] ?? ''}
+                            onChange={e => updateDiscrepancyCount(item.key, e.target.value)}
+                            style={{width:'100%',background:'#fff',border:'1.5px solid var(--border)',borderRadius:'var(--radius-sm)',padding:'5px 8px',fontSize:'13px',fontFamily:'var(--font-mono)',fontWeight:'800',textAlign:'center'}}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  <div style={{display:'flex',gap:'8px',justifyContent:'flex-end'}}>
+                    <button onClick={() => setDiscrepancyReview(null)}
+                      style={{background:'transparent',color:'var(--text-muted)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',padding:'7px 10px',fontSize:'10px',fontWeight:'700',cursor:'pointer'}}>CANCEL</button>
+                    <button className="btn" onClick={confirmDiscrepancyReview} style={{fontSize:'10px',padding:'7px 12px'}}>CONFIRM STAFFING COUNTS</button>
+                  </div>
+                </div>
+              )}
               {schedLoaded && (
                 <div style={{marginTop:'14px'}}>
                   {dateMismatch ? (
@@ -715,10 +1234,94 @@ export default function App() {
               {(!schedLoaded||!qgLoaded) && <div className="warn-text">Load QGenda and schedule on Daily Board first</div>}
             </div>
             {schedLoaded && rooms.length > 0 && (
+              <div style={{background:'#ffffff',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'10px 12px',marginBottom:'12px'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'12px',marginBottom:'8px'}}>
+                  <div className="section-label" style={{marginBottom:0}}>ASSIGNMENT CONFIDENCE SUMMARY</div>
+                  <div style={{fontSize:'10px',color:'var(--text-muted)',fontWeight:'700',letterSpacing:'1px'}}>READ ONLY</div>
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:'8px'}}>
+                  {assignmentConfidenceSummary.statements.map((item, i) => (
+                    <div key={`${item.category}-${i}`} className={item.category === 'review suggested' ? 'flag-warn' : 'flag-info'} style={{marginTop:0}}>
+                      <strong>{item.category}</strong> - {item.text}
+                    </div>
+                  ))}
+                </div>
+                <div style={{fontSize:'10px',color:'var(--text-muted)',marginTop:'8px'}}>
+                  Based on protected expertise usage, alternate pathways, manual overrides, review notes, and reconciliation discrepancies.
+                </div>
+              </div>
+            )}
+            {schedLoaded && rooms.length > 0 && (
               <div style={{background:'var(--bg-elevated)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'8px 14px',marginBottom:'12px',display:'flex',alignItems:'center',gap:'12px',flexWrap:'wrap'}}>
                 <span style={{fontSize:'10px',color:'var(--accent-blue)',letterSpacing:'1px',fontWeight:'600'}}>⇄ ROOM PAIRING</span>
                 <span style={{fontSize:'10px',color:'var(--text-muted)'}}>Drag one card onto another to pair them. Paired rooms share one provider (morning → afternoon). Click ✕ on a badge to break a pair.</span>
                 {pairCount > 0 && <button onClick={() => setRoomPairs({})} style={{marginLeft:'auto',background:'transparent',border:'1px solid #475569',borderRadius:'var(--radius-sm)',color:'#64748b',fontSize:'9px',padding:'3px 8px',cursor:'pointer',fontFamily:'var(--font-mono)',letterSpacing:'1px'}}>CLEAR ALL PAIRS</button>}
+              </div>
+            )}
+            {schedLoaded && rooms.length > 0 && (
+              <div style={{background:'#ffffff',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'10px 12px',marginBottom:'12px',overflowX:'auto'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'12px',marginBottom:'8px'}}>
+                  <div className="section-label" style={{marginBottom:0}}>ROOM RECONCILIATION DIAGNOSTIC</div>
+                  <div style={{fontSize:'10px',color:'var(--text-muted)',fontWeight:'700',letterSpacing:'1px'}}>READ ONLY</div>
+                </div>
+                <table style={{width:'100%',borderCollapse:'collapse',minWidth:'980px'}}>
+                  <thead>
+                    <tr>
+                      {['AREA','CUBE VISIBLE','OR.ENDO.CCL','RESERVE CREATED','EXCESS CUBE','REMAINING DEFICIT','PHANTOMS / SOURCE','WARNINGS'].map(h => (
+                        <th key={h} style={{background:'var(--bg-elevated)',borderBottom:'1px solid var(--border)',padding:'6px 8px',textAlign:'left',fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',fontWeight:'700'}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reconciliationDiagnostics.map((row, i) => (
+                      <tr key={row.label} style={{background:i%2===0?'var(--bg-surface)':'#ffffff'}}>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'11px',fontWeight:'800',color:'var(--text-primary)',whiteSpace:'nowrap'}}>{row.label}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'11px',color:'var(--text-secondary)'}}>{row.cubeVisibleCount}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'11px',color:'var(--text-secondary)'}}>{row.obligation || '0'}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'11px',fontWeight:'700',color:row.reserveCreated?'var(--accent-green)':'var(--text-muted)'}}>{row.reserveCreated ? 'Yes' : 'No'}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'11px',fontWeight:'700',color:row.excessCubeCount?'var(--accent-amber)':'var(--text-muted)'}}>{row.excessCubeCount}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'11px',fontWeight:'700',color:row.remainingDeficit?'var(--accent-amber)':'var(--text-muted)'}}>{row.remainingDeficit}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'10px',color:'var(--text-secondary)',lineHeight:1.6}}>
+                          {row.phantomRooms.length
+                            ? row.phantomRooms.map(room => `${room.name} (${room.source})`).join('; ')
+                            : 'None'}
+                        </td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'10px',color:row.warnings.length?'var(--accent-amber)':'var(--text-muted)',lineHeight:1.6}}>
+                          {row.warnings.length ? row.warnings.map(w => w.msg).join(' ') : 'None'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {protectedExpertiseAuditRows.length > 0 && (
+              <div style={{background:'#ffffff',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'10px 12px',marginBottom:'12px',overflowX:'auto'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'12px',marginBottom:'8px'}}>
+                  <div className="section-label" style={{marginBottom:0}}>PROTECTED REGIONAL EXPERTISE AUDIT</div>
+                  <div style={{fontSize:'10px',color:'var(--text-muted)',fontWeight:'700',letterSpacing:'1px'}}>READ ONLY</div>
+                </div>
+                <table style={{width:'100%',borderCollapse:'collapse',minWidth:'900px'}}>
+                  <thead>
+                    <tr>
+                      {['ROOM','WHY PROTECTED','RESERVED PROVIDER','PATHWAY','ALTERNATE REQUIRED','NOTE'].map(h => (
+                        <th key={h} style={{background:'var(--bg-elevated)',borderBottom:'1px solid var(--border)',padding:'6px 8px',textAlign:'left',fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',fontWeight:'700'}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {protectedExpertiseAuditRows.map((row, i) => (
+                      <tr key={row.room} style={{background:i%2===0?'var(--bg-surface)':'#ffffff'}}>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'11px',fontWeight:'800',color:'var(--text-primary)',whiteSpace:'nowrap'}}>{row.room}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'10px',color:'var(--text-secondary)',lineHeight:1.6}}>{row.reasons.join('; ') || 'Protected regional signal detected'}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'11px',fontWeight:'700',color:'var(--text-primary)',whiteSpace:'nowrap'}}>{row.reservedProvider || 'None'}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'11px',fontWeight:'700',color:row.pathway==='Preferred'?'var(--accent-green)':'var(--accent-amber)',whiteSpace:'nowrap'}}>{row.pathway}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'11px',fontWeight:'700',color:row.alternateRequired?'var(--accent-amber)':'var(--text-muted)',whiteSpace:'nowrap'}}>{row.alternateRequired ? 'Yes' : 'No'}</td>
+                        <td style={{padding:'7px 8px',borderBottom:'1px solid var(--border)',fontSize:'10px',color:'var(--text-muted)',lineHeight:1.6}}>{row.note}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
             {careTeamResult?.careTeams?.length > 0 && (
@@ -794,32 +1397,70 @@ export default function App() {
             )}
             <div className="room-grid">
               {rooms.map(room => {
+                const roomKey = roomIdentity(room);
                 const ac = ACUITY_COLORS[room.acuity]||'#475569';
                 const conflict = room.assignedProvider && room.avoidProviders?.includes(room.assignedProvider);
-                const isExp = expanded === `room-${room.room}`;
+                const isExp = expanded === `room-${roomKey}`;
                 const ctColor = room.isCareTeam && room.careTeamId !== undefined ? CARE_TEAM_COLORS[room.careTeamId % CARE_TEAM_COLORS.length] : null;
-                const pairedWith = roomPairs[room.room];
-                const isDragOver = dragOverRoom === room.room && dragSourceRoom !== room.room;
-                const isDragging = dragSourceRoom === room.room;
+                const pairedWith = roomPairs[roomKey];
+                const isDragOver = dragOverRoom === roomKey && dragSourceRoom !== roomKey;
+                const isDragging = dragSourceRoom === roomKey;
+                const explanation = room.assignmentExplanation;
+                const reviewNotes = room.assignmentReviewNotes || [];
+                const manualOverride = room.manualOverride;
 
                 if (room.isPhantom) {
                   const phantomCtColor = CARE_TEAM_COLORS[0];
                   return (
-                    <div key={room.room} className="card room-card" style={{borderLeft:`3px solid ${phantomCtColor.border}`,borderColor:phantomCtColor.border,background:phantomCtColor.bg,opacity:0.9}}>
+                    <div key={roomKey} className="card room-card" style={{borderLeft:`3px solid ${phantomCtColor.border}`,borderColor:phantomCtColor.border,background:phantomCtColor.bg,opacity:0.9}}>
                       {room.careTeamLabel && <div style={{fontSize:'9px',color:phantomCtColor.text,letterSpacing:'1px',marginBottom:'5px',fontWeight:'600'}}>{room.careTeamLabel}</div>}
                       <div className="room-header"><span className="room-name" style={{color:phantomCtColor.text}}>{room.room}</span><span style={{fontSize:'9px',color:phantomCtColor.border,letterSpacing:'1px',fontWeight:'700'}}>ADD-ON SLOT</span></div>
                       <div style={{fontSize:'10px',color:'var(--text-secondary)',marginTop:'4px',fontStyle:'italic'}}>No cases booked — add-on slot</div>
+                      <div style={{marginTop:'8px'}}>
+                        <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>ATTENDING MD</div>
+                        <select className="room-select" style={{borderColor:phantomCtColor.border}}
+                          value={room.assignedProvider||''} onClick={e=>e.stopPropagation()} onChange={e=>{e.stopPropagation();updateAssignment(roomKey,e.target.value);}}>
+                          <option value="">Unassigned reserve</option>
+                          {qg?.workingMDs?.map(p=>(<option key={p.name} value={p.name}>{p.name} ({p.role})</option>))}
+                        </select>
+                        {manualOverride && (
+                          <div style={{marginTop:'5px'}}>
+                            <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>OVERRIDE REASON</div>
+                            <select className="room-select" style={{borderColor:'#06b6d4'}}
+                              value={manualOverride.reason} onClick={e=>e.stopPropagation()}
+                              onChange={e=>{e.stopPropagation();updateOverrideReason(roomKey,e.target.value);}}>
+                              {OVERRIDE_REASONS.map(reason => <option key={reason} value={reason}>{reason}</option>)}
+                            </select>
+                          </div>
+                        )}
+                      </div>
                       <div style={{marginTop:'8px'}}><div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>ANESTHETIST</div><div style={{background:'var(--bg-base)',border:`1px solid ${phantomCtColor.border}`,borderRadius:'var(--radius-sm)',padding:'5px 8px',fontSize:'11px',color:phantomCtColor.text}}>{room.anesthetist || '—'}</div></div>
+                      {explanation && (
+                        <div style={{marginTop:'6px',background:'#ffffff',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',padding:'6px 8px'}}>
+                          <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',fontWeight:'700'}}>{explanation.doctrineCategory} - {explanation.assignmentType}</div>
+                          <div style={{fontSize:'10px',color:'var(--text-secondary)',marginTop:'2px'}}>{explanation.primaryReason} - {explanation.note}</div>
+                        </div>
+                      )}
+                      {reviewNotes.map((reviewNote, i) => (
+                        <div key={i} className={reviewNote.category === 'review suggested' ? 'flag-warn' : 'flag-info'} style={{marginTop:'6px'}}>
+                          <strong>{reviewNote.category}</strong> - {reviewNote.note}
+                        </div>
+                      ))}
+                      {manualOverride && (
+                        <div className="flag-info" style={{marginTop:'6px'}}>
+                          <strong>manual override</strong> - {manualOverride.note}
+                        </div>
+                      )}
                     </div>
                   );
                 }
 
                 return (
-                  <div key={room.room} className="card room-card" draggable
-                    onDragStart={e => handleDragStart(e, room.room)} onDragOver={e => handleDragOver(e, room.room)}
-                    onDragLeave={handleDragLeave} onDrop={e => handleDrop(e, room.room)} onDragEnd={handleDragEnd}
+                  <div key={roomKey} className="card room-card" draggable
+                    onDragStart={e => handleDragStart(e, roomKey)} onDragOver={e => handleDragOver(e, roomKey)}
+                    onDragLeave={handleDragLeave} onDrop={e => handleDrop(e, roomKey)} onDragEnd={handleDragEnd}
                     style={{borderLeft:`3px solid ${pairedWith?'#06b6d4':ctColor?ctColor.border:ac}`,borderColor:isDragOver?'#06b6d4':conflict?'#ef4444':pairedWith?'#06b6d4':ctColor?ctColor.border:'var(--border)',background:isDragOver?'#dbeafe':isDragging?'var(--bg-elevated)':ctColor?ctColor.bg:'var(--bg-surface)',outline:isDragOver?'2px dashed #06b6d4':'none',opacity:isDragging?0.6:1,cursor:'grab',transition:'border-color 0.15s, background 0.15s, outline 0.15s'}}
-                    onClick={() => setExpanded(isExp ? null : `room-${room.room}`)}>
+                    onClick={() => setExpanded(isExp ? null : `room-${roomKey}`)}>
                     {pairedWith && (
                       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'5px'}}>
                         <div style={{display:'inline-flex',alignItems:'center',gap:'5px',background:'#ecfeff',border:'1.5px solid #0891b2',borderRadius:'var(--radius-sm)',padding:'2px 7px'}}>
@@ -845,10 +1486,20 @@ export default function App() {
                     <div style={{marginBottom:'5px'}}>
                       <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>ATTENDING MD {pairedWith && <span style={{color:'#06b6d4'}}>— shared with {pairedWith}</span>}</div>
                       <select className="room-select" style={{borderColor:conflict?'#ef4444':pairedWith?'#06b6d4':ctColor?ctColor.border:'var(--border)'}}
-                        value={room.assignedProvider||''} onClick={e=>e.stopPropagation()} onChange={e=>{e.stopPropagation();updateAssignment(room.room,e.target.value);}}>
+                        value={room.assignedProvider||''} onClick={e=>e.stopPropagation()} onChange={e=>{e.stopPropagation();updateAssignment(roomKey,e.target.value);}}>
                         <option value="">— Unassigned —</option>
                         {qg?.workingMDs?.map(p=>(<option key={p.name} value={p.name}>{room.preferredProviders?.includes(p.name)?'★ ':room.avoidProviders?.includes(p.name)?'⚠ ':''}{p.name} ({p.role})</option>))}
                       </select>
+                      {manualOverride && (
+                        <div style={{marginTop:'5px'}}>
+                          <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>OVERRIDE REASON</div>
+                          <select className="room-select" style={{borderColor:'#06b6d4'}}
+                            value={manualOverride.reason} onClick={e=>e.stopPropagation()}
+                            onChange={e=>{e.stopPropagation();updateOverrideReason(roomKey,e.target.value);}}>
+                            {OVERRIDE_REASONS.map(reason => <option key={reason} value={reason}>{reason}</option>)}
+                          </select>
+                        </div>
+                      )}
                     </div>
                     <div>
                       <div style={{fontSize:'9px',color:'var(--text-muted)',letterSpacing:'1px',marginBottom:'3px'}}>ANESTHETIST</div>
@@ -856,6 +1507,21 @@ export default function App() {
                     </div>
                     {conflict && <div className="flag-crit" style={{marginTop:'6px'}}>⚠ Conflict — {room.assignedProvider} flagged for this room</div>}
                     {room.cardiacNote && <div className="flag-info" style={{marginTop:'6px'}}>{room.cardiacNote}</div>}
+                    {explanation && (
+                      <div className={explanation.assignmentType === 'compromise' ? 'flag-warn' : 'flag-info'} style={{marginTop:'6px'}}>
+                        <strong>{explanation.doctrineCategory}</strong> - {explanation.primaryReason}: {explanation.note}
+                      </div>
+                    )}
+                    {reviewNotes.map((reviewNote, i) => (
+                      <div key={i} className={reviewNote.category === 'review suggested' ? 'flag-warn' : 'flag-info'} style={{marginTop:'6px'}}>
+                        <strong>{reviewNote.category}</strong> - {reviewNote.note}
+                      </div>
+                    ))}
+                    {manualOverride && (
+                      <div className="flag-info" style={{marginTop:'6px'}}>
+                        <strong>manual override</strong> - {manualOverride.note}
+                      </div>
+                    )}
                     {isExp && (
                       <div className="room-detail">
                         {room.preferredProviders?.length>0 && <div className="detail-preferred">★ Preferred: {room.preferredProviders.join(', ')}</div>}
@@ -869,6 +1535,15 @@ export default function App() {
               })}
             </div>
           </div>
+        )}
+
+        {/* ASSIGNMENT REVIEW */}
+        {tab === 'review' && (
+          <AssignmentReview
+            rooms={rooms}
+            date={selectedDate}
+            resolvedOperationalObligations={resolvedOperationalObligations}
+          />
         )}
 
         {/* ── 2PM HANDOFF ── */}

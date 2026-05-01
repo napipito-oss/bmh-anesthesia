@@ -44,7 +44,7 @@ export function classifyRoom(roomStr) {
   const isCathEP = r.includes('cl ') || r.includes('cath') ||
     r.includes('yanes') || r.includes('ep lab') || r.includes('ep ');
   const isBOOS   = r.includes('boos');
-  const isAddOn  = /\bwl\b/i.test(roomStr || '');   // tightened: word-boundary match
+  const isAddOn  = /\bwl\b/i.test(roomStr || '') || /\badd[-\s/]*on\b/i.test(roomStr || '');
   const isMainOR = !isIR && !isEndo && !isCathEP && !isBOOS;
  
   let building;
@@ -422,8 +422,8 @@ export function classifyCase(procedure, surgeon, room) {
   };
 }
  
-export function parseCubeData(raw, forceDateStr, mainORCommitted, committedCath) {
-  if (!raw?.trim()) return { rooms: [], excluded: [], flagged: [], targetDate: null, totalParsed: 0 };
+export function parseCubeData(raw, forceDateStr, mainORCommitted, committedCath, committedEndo, committedBoos, committedIr) {
+  if (!raw?.trim()) return { rooms: [], excluded: [], flagged: [], targetDate: null, totalParsed: 0, reconciliationWarnings: [] };
  
   const lines      = raw.trim().split('\n');
   const allCases   = [];
@@ -460,7 +460,7 @@ export function parseCubeData(raw, forceDateStr, mainORCommitted, committedCath)
     if (!caseP) continue;
  
     const roomP = parts.find(p =>
-      /BMH\s+(OR\s+\d+|Endo\s+\d+|CL\s+\d+|CL\s+Minor|yAnes|BOOS|rIR\s*\d*|IR\s+\d+|Endo\s+BS|WL\b)/i.test(p) ||
+      /BMH\s+(OR\s+\d+|Endo\s+\d+|Endo\s+Add[-\s/]*On|CL\s+\d+|CL\s+Minor|Cath\s+.*Add[-\s/]*On|yAnes|BOOS|rIR\s*\d*|IR\s+\d+|Endo\s+BS|WL\b|(?:OR\s+)?Add[-\s/]*On\b)/i.test(p) ||
       /BOOS\s+OR\s+\d+/i.test(p)
     ) || '';
  
@@ -540,12 +540,16 @@ export function parseCubeData(raw, forceDateStr, mainORCommitted, committedCath)
       allIntel.some(i => i.acuity === 'peds')        ? 'peds' :
       allIntel.some(i => i.acuity === 'medium-high') ? 'medium-high' : 'routine';
  
-    const building = roomCases[0]?.building || classifyRoom(room).building;
+    const roomType = classifyRoom(room);
+    const building = roomCases[0]?.building || roomType.building;
  
     return {
       room,
       area:               roomCases[0].area,
       building,
+      // Functional add-ons are visible Cube rooms with cases. They count as
+      // normal operational rooms and should not be treated as phantom reserve.
+      addOnType:          roomType.isAddOn ? 'functional' : null,
       cases:              roomCases,
       caseCount:          roomCases.length,
       surgeons:           [...new Set(roomCases.map(c => c.surgeon))],
@@ -569,78 +573,290 @@ export function parseCubeData(raw, forceDateStr, mainORCommitted, committedCath)
     };
   }).sort((a, b) => a.room.localeCompare(b.room));
  
-  // ── OR.endo.CCL Main OR cap ───────────────────────────────────
-  // If the Main OR committed number is provided and the cube shows MORE rooms
-  // than committed, trim the excess Main OR rooms (lowest acuity first,
-  // then highest room number). Non-Main OR rooms (Endo/Cath/BOOS/IR) are
-  // never trimmed — those are managed separately. If the cube shows FEWER
-  // rooms than committed, we do nothing — rooms may have been consolidated.
   let finalRooms = roomAssignments;
-  if (typeof mainORCommitted === 'number' && mainORCommitted > 0) {
-    const mainORRooms = roomAssignments.filter(r =>
+  const reconciliationWarnings = [];
+  const operationalDiscrepancies = [];
+
+  const roomPriorityRank = room => {
+    const acuityRank = { cardiac: 0, high: 1, peds: 2, 'medium-high': 3, routine: 4 }[room.acuity] ?? 5;
+    return acuityRank * 1000 - (room.blockRequired ? 500 : 0) - (room.caseCount || 0);
+  };
+
+  const markStaffingExcluded = (room, label, committed, booked) => ({
+    ...room,
+    // OR.Endo.CCL is the anesthesia staffing source of truth. Cube is
+    // procedural visibility only; excess Cube rooms are likely temporary
+    // placeholders or consolidation targets, not extra staffing obligations.
+    staffingExcluded: true,
+    staffingExclusionReason: `${label}: Cube room exceeds OR.Endo.CCL staffing obligation (${booked} visible / ${committed} committed).`,
+    assignedProvider: null,
+    anesthetist: null,
+    isCareTeam: false,
+    careTeamLabel: null,
+    careTeamRatio: null,
+    flags: [
+      ...(room.flags || []),
+      {
+        level: 'warn',
+        msg: `${label}: visibility only — not staffed because Cube exceeds OR.Endo.CCL obligation.`,
+      },
+    ],
+  });
+
+  const buildOperationalDiscrepancy = ({ label, key, committed, visible }) => {
+    if (typeof committed !== 'number' || committed < 0) return null;
+    const difference = Math.abs(visible - committed);
+    if (difference === 0) return null;
+
+    let level = 'info';
+    let requiresConfirmation = false;
+    let interpretation = 'Cube procedural visibility differs from OR.Endo.CCL staffing obligation.';
+
+    if (key === 'mainOR') {
+      if (difference <= 1) {
+        level = 'info';
+        interpretation = 'Likely open-heart, add-on reserve, or expected consolidation behavior.';
+      } else if (difference === 2) {
+        level = 'warn';
+        interpretation = 'Mild Main OR mismatch; likely placeholder or consolidation issue.';
+      } else {
+        level = 'critical';
+        requiresConfirmation = true;
+        interpretation = 'Large Main OR mismatch; confirm intended anesthesia staffing obligation before assignment.';
+      }
+    } else if (key === 'endo' || key === 'cath') {
+      const zeroVisibilityWithObligation = committed > 0 && visible === 0;
+      const majorMismatch = zeroVisibilityWithObligation || difference >= 2;
+      level = majorMismatch ? 'critical' : 'warn';
+      requiresConfirmation = majorMismatch;
+      interpretation = zeroVisibilityWithObligation
+        ? `${label} obligation exists but Cube shows no anesthesia-relevant procedural visibility.`
+        : `${label} procedural visibility differs from staffing obligation; confirm if this is expected.`;
+    } else if (key === 'boos') {
+      const majorMismatch = committed > 0 && visible === 0;
+      level = majorMismatch ? 'critical' : 'warn';
+      requiresConfirmation = majorMismatch;
+      interpretation = majorMismatch
+        ? 'BOOS obligation exists but Cube shows no BOOS procedural visibility.'
+        : 'BOOS visibility differs from staffing obligation; confirm if this is expected.';
+    }
+
+    return {
+      source: 'operational-discrepancy-arbitration',
+      area: label,
+      key,
+      obligated: committed,
+      visible,
+      difference,
+      level,
+      requiresConfirmation,
+      suggestedCount: committed,
+      interpretation,
+      msg: `${label}: OR.Endo.CCL shows ${committed}, Cube shows ${visible}. ${interpretation}`,
+    };
+  };
+
+  const reserveRoomNameForIndex = (baseName, index, total) =>
+    total === 1 ? baseName : `${baseName} ${index + 1}`;
+
+  const cathReserveRoomNameForIndex = (visibleCathCount, index) => {
+    if (visibleCathCount > 0 && index === 0) return 'Cath Lab Minors';
+    return 'Cath Lab Undefined';
+  };
+
+  const makeReserveRoom = (room, area, building, flags = {}, generatedRoomId = room) => ({
+    generatedRoomId,
+    room,
+    area,
+    building,
+    // Phantom add-ons are created only by obligation reconciliation when the
+    // committed room count exceeds visible Cube rooms.
+    addOnType: 'phantom',
+    cases: [],
+    caseCount: 0,
+    surgeons: [],
+    startTime: null,
+    acuity: 'routine',
+    blockRequired: false,
+    blockPossible: false,
+    isCathEP: false,
+    isCardiac: false,
+    isThoracic: false,
+    isEndo: false,
+    isBOOS: false,
+    isIR: false,
+    isPhantom: true,
+    roomState: 'Add-On Reserve',
+    preferredProviders: [],
+    avoidProviders: [],
+    flags: [{ level: 'info', msg: `${room} — Add-On Reserve per OR.Endo.CCL, no cases booked yet` }],
+    assignedProvider: null,
+    caseStatus: 'Not Started',
+    cardiacNote: '',
+    manuallyAdded: false,
+    ...flags,
+  });
+
+  const reconcileArea = ({ label, reserveRoomName, area, building, committed, activeRooms, flags, reserveNameForIndex }) => {
+    if (typeof committed !== 'number' || committed < 0) return;
+
+    if (activeRooms.length > committed) {
+      const sortedRooms = [...activeRooms].sort((a, b) => {
+        const byPriority = roomPriorityRank(a) - roomPriorityRank(b);
+        return byPriority || a.room.localeCompare(b.room);
+      });
+      const keepRooms = new Set(sortedRooms.slice(0, committed).map(r => r.room));
+      finalRooms = finalRooms.map(room =>
+        activeRooms.some(activeRoom => activeRoom.room === room.room) && !keepRooms.has(room.room)
+          ? markStaffingExcluded(room, label, committed, activeRooms.length)
+          : room
+      );
+      reconciliationWarnings.push({
+        source: 'room-obligation-reconciliation',
+        area: label,
+        needed: committed,
+        booked: activeRooms.length,
+        level: 'warn',
+        msg: `${label}: Cube shows ${activeRooms.length} anesthesia room${activeRooms.length !== 1 ? 's' : ''}, but OR.Endo.CCL staffing obligation is ${committed}. Excess Cube room${activeRooms.length - committed !== 1 ? 's are' : ' is'} preserved for visibility only and will not be staffed.`,
+      });
+      return;
+    }
+
+    if (activeRooms.length < committed) {
+      const missing = committed - activeRooms.length;
+      const reserveRooms = Array.from({ length: missing }, (_, index) =>
+        makeReserveRoom(
+          reserveNameForIndex
+            ? reserveNameForIndex(index, missing, activeRooms.length)
+            : reserveRoomNameForIndex(reserveRoomName, index, missing),
+          area,
+          building,
+          flags,
+          `${label}:${reserveRoomName}:${activeRooms.length + index + 1}`
+        )
+      );
+      // Resolved operational obligations generate the downstream anesthesia
+      // room structures. Cube visibility supplies procedural context only; it
+      // cannot erase obligated coverage when no procedural room is visible.
+      finalRooms = [
+        ...finalRooms,
+        ...reserveRooms,
+      ];
+      if (missing > 1) {
+        reconciliationWarnings.push({
+          source: 'room-obligation-reconciliation',
+          area: label,
+          needed: committed,
+          booked: activeRooms.length,
+          level: 'warn',
+          msg: `${label}: OR.Endo.CCL obligation exceeds Cube active rooms by ${missing}. ${missing} obligated reserve room${missing !== 1 ? 's were' : ' was'} created from resolved staffing obligations.`,
+        });
+      }
+    }
+  };
+
+  [
+    {
+      label: 'Main OR',
+      key: 'mainOR',
+      committed: mainORCommitted,
+      activeRooms: finalRooms.filter(r =>
+        r.building === 'MAIN_OR_FLOOR' && !r.isEndo && !r.isCathEP && !r.isBOOS && !r.isIR
+      ),
+    },
+    {
+      label: 'Endo',
+      key: 'endo',
+      committed: committedEndo,
+      activeRooms: finalRooms.filter(r => r.isEndo),
+    },
+    {
+      label: 'Cath',
+      key: 'cath',
+      committed: committedCath,
+      activeRooms: finalRooms.filter(r => r.isCathEP),
+    },
+    {
+      label: 'BOOS',
+      key: 'boos',
+      committed: committedBoos,
+      activeRooms: finalRooms.filter(r => r.isBOOS),
+    },
+  ].forEach(area => {
+    const discrepancy = buildOperationalDiscrepancy({
+      label: area.label,
+      key: area.key,
+      committed: area.committed,
+      visible: area.activeRooms.length,
+    });
+    if (discrepancy) operationalDiscrepancies.push(discrepancy);
+  });
+
+  reconcileArea({
+    label: 'Main OR',
+    reserveRoomName: 'Main OR Add-On',
+    area: 'BMH MAIN OR',
+    building: 'MAIN_OR_FLOOR',
+    committed: mainORCommitted,
+    activeRooms: finalRooms.filter(r =>
       r.building === 'MAIN_OR_FLOOR' && !r.isEndo && !r.isCathEP && !r.isBOOS && !r.isIR
-    );
-    const otherRooms  = roomAssignments.filter(r =>
-      r.building !== 'MAIN_OR_FLOOR' || r.isEndo || r.isCathEP || r.isBOOS || r.isIR
-    );
-    if (mainORRooms.length > mainORCommitted) {
-      // Rank by priority to keep — cardiac > high > peds > medium-high > routine,
-      // then by blockRequired, then by caseCount desc
-      const priorityRank = a => {
-        const acuityRank = { cardiac: 0, high: 1, peds: 2, 'medium-high': 3, routine: 4 }[a.acuity] ?? 5;
-        return acuityRank * 1000 - (a.blockRequired ? 500 : 0) - (a.caseCount || 0);
-      };
-      const keep = [...mainORRooms].sort((a, b) => priorityRank(a) - priorityRank(b)).slice(0, mainORCommitted);
-      const keepSet = new Set(keep.map(r => r.room));
-      finalRooms = roomAssignments.filter(r => keepSet.has(r.room) || otherRooms.includes(r));
-    }
-  }
- 
-  // ── Cath Lab Add-On phantom generation ──────────────────────────
-  // OR.endo.CCL is both floor AND ceiling for cath rooms we cover.
-  // If committedCath > visible cath rooms, generate phantom Cath Lab Add-On
-  // rooms to reach committed count. These are treated as cath minors
-  // (low acuity, no specific procedure) and will be assigned by cardiacDecisionTree
-  // with CV Call preference (easier to extract for emergency open heart).
-  // If committedCath <= visible, no phantoms generated. We never trim cath
-  // rooms down — if the cube shows 3 cath rooms and we're committed to 2,
-  // that's a scheduling oversight we don't handle here.
-  if (typeof committedCath === 'number' && committedCath > 0) {
-    const cathRooms = finalRooms.filter(r => r.isCathEP);
-    const phantomsNeeded = committedCath - cathRooms.length;
-    if (phantomsNeeded > 0) {
-      const cathPhantoms = Array.from({ length: phantomsNeeded }, (_, i) => ({
-        room:            phantomsNeeded === 1 ? 'Cath Lab Add-On' : `Cath Lab Add-On ${i + 1}`,
-        area:            'BMH CATH LAB',
-        building:        'CATH_FLOOR',
-        cases:           [],
-        caseCount:       0,
-        surgeons:        [],
-        startTime:       null,
-        acuity:          'routine',
-        blockRequired:   false,
-        blockPossible:   false,
-        isCathEP:        true,
-        isCardiac:       false,
-        isThoracic:      false,
-        isEndo:          false,
-        isBOOS:          false,
-        isIR:            false,
-        isPhantom:       true,
-        isCathMinors:    true,
-        preferredProviders: [],
-        avoidProviders:  [],
-        flags:           [{ level: 'info', msg: 'Cath Lab Add-On — reserved per OR.endo.CCL, no cases booked yet' }],
-        assignedProvider: null,
-        caseStatus:      'Not Started',
-        cardiacNote:     '',
-        manuallyAdded:   false,
-      }));
-      finalRooms = [...finalRooms, ...cathPhantoms];
-    }
-  }
- 
-  return { rooms: finalRooms, excluded, flagged, targetDate, totalParsed: todayCases.length };
+    ),
+  });
+
+  reconcileArea({
+    label: 'Endo',
+    reserveRoomName: 'Endo Add-On',
+    area: 'BMH ENDO',
+    building: 'ENDO_FLOOR',
+    committed: committedEndo,
+    activeRooms: finalRooms.filter(r => r.isEndo),
+    flags: { isEndo: true },
+  });
+
+  reconcileArea({
+    label: 'Cath',
+    reserveRoomName: 'Cath Lab Undefined',
+    area: 'BMH CATH LAB',
+    building: 'CATH_FLOOR',
+    committed: committedCath,
+    activeRooms: finalRooms.filter(r => r.isCathEP),
+    flags: { isCathEP: true, isCathMinors: true },
+    // Generated cath rooms should state operational uncertainty honestly.
+    // Use Minors only when there is some cath visibility; otherwise the
+    // obligated coverage exists, but procedural placement is undefined.
+    reserveNameForIndex: (index, _missing, visibleCathCount) =>
+      cathReserveRoomNameForIndex(visibleCathCount, index),
+  });
+
+  reconcileArea({
+    label: 'BOOS',
+    reserveRoomName: 'BOOS Add-On',
+    area: 'BOOS OR',
+    building: 'BOOS',
+    committed: committedBoos,
+    activeRooms: finalRooms.filter(r => r.isBOOS),
+    flags: { isBOOS: true },
+  });
+
+  reconcileArea({
+    label: 'IR',
+    reserveRoomName: 'IR Add-On',
+    area: 'BMH IR',
+    building: 'IR',
+    committed: committedIr,
+    activeRooms: finalRooms.filter(r => r.isIR),
+    flags: { isIR: true },
+  });
+
+  return {
+    rooms: finalRooms,
+    excluded,
+    flagged,
+    targetDate,
+    totalParsed: todayCases.length,
+    reconciliationWarnings,
+    operationalDiscrepancies,
+  };
 }
  
 export function cardiacDecisionTree(rooms, cvCallMD, backupCVMD) {

@@ -1,5 +1,6 @@
 import { buildAssignments } from '../utils/parsers.js';
 import { buildCareTeams } from '../utils/careTeams.js';
+import { annotateAssignmentExplanations } from './rules.js';
 
 function buildPairsFromFractional(fractionalPairs, rooms) {
   const newPairs = {};
@@ -31,6 +32,10 @@ function buildPairsFromFractional(fractionalPairs, rooms) {
   return newPairs;
 }
 
+function roomIdentity(room, index = 0) {
+  return room?.generatedRoomId || `${room?.room || 'room'}::${index}`;
+}
+
 export function buildDailyAssignments({
   rooms,
   qg,
@@ -39,15 +44,29 @@ export function buildDailyAssignments({
   anesthetistHistory,
   fractionalPairs,
 }) {
-  const assigned = qg ? buildAssignments(rooms, qg, orCallChoice) : rooms;
+  const staffableRooms = (rooms || []).filter(room => !room.staffingExcluded);
+  const visibilityOnlyRooms = (rooms || []).filter(room => room.staffingExcluded);
+  const assigned = qg ? buildAssignments(staffableRooms, qg, orCallChoice) : staffableRooms;
   const result = qg
     ? buildCareTeams(assigned, qg, anesthetistHistory, resourceStructure, orCallChoice)
     : { rooms: assigned, careTeams: [], floats: [], available: [] };
+  const visibilityRoomMap = new Map(visibilityOnlyRooms.map((room, index) => [roomIdentity(room, index), room]));
+  const assignedRoomMap = new Map(result.rooms.map((room, index) => [roomIdentity(room, index), room]));
+  const mergedRooms = [
+    ...(rooms || []).map((room, index) =>
+      visibilityRoomMap.get(roomIdentity(room, index)) || assignedRoomMap.get(roomIdentity(room, index))
+    ).filter(Boolean),
+    ...result.rooms.filter((room, index) =>
+      !(rooms || []).some((originalRoom, originalIndex) => roomIdentity(originalRoom, originalIndex) === roomIdentity(room, index))
+    ),
+  ];
+  const roomsWithExplanations = annotateAssignmentExplanations(mergedRooms);
 
   return {
     ...result,
+    rooms: roomsWithExplanations,
     roomPairs: fractionalPairs?.length > 0
-      ? buildPairsFromFractional(fractionalPairs, result.rooms)
+      ? buildPairsFromFractional(fractionalPairs, roomsWithExplanations.filter(room => !room.staffingExcluded))
       : undefined,
   };
 }

@@ -53,12 +53,17 @@
 import { classifyRoom } from './parsers.js';
 import {
   BRAND_ENDO_PROVIDER,
-  CARE_TEAM_AVOID,
   CARE_TEAM_IDEAL_RATIO,
   CARE_TEAM_LOCATION_HARD_AVOIDANCES,
   CARE_TEAM_MAX_RATIO,
   CARE_TEAM_RELUCTANT,
   REGIONAL_BLOCK_PROVIDER_PRIORITY,
+  getCareTeamDoctrineClassifications,
+  getProtectedExpertiseRoomMetadata,
+  getCareTeamEligibilityNotes,
+  isEligibleForCareTeam,
+  isEligibleForSoloAssignment,
+  isProtectedExpertiseRoom,
 } from '../engine/rules.js';
  
 export function getRoomBuilding(room) {
@@ -140,6 +145,21 @@ const PERIPHERAL_BLOCK_KEYWORDS = [
   'supraclavicular','wrist block','ankle block',
 ];
 const REGIONAL_CAPABLE = REGIONAL_BLOCK_PROVIDER_PRIORITY;
+const PROTECTED_EXPERTISE_PREFERRED = ['Nielson, Mark', 'Lambert', 'Pipito, Nicholas A'];
+const PROTECTED_EXPERTISE_ALTERNATE = ['Pond, William', 'Dodwani', 'Wu, Jennifer'];
+
+function isAddOnReserveRoom(room) {
+  return room?.addOnType === 'phantom' || room?.roomState === 'Add-On Reserve' || room?.isPhantom;
+}
+
+function roomIdentity(room) {
+  return room?.generatedRoomId || room?.room;
+}
+
+function findRoomIndex(rooms, targetRoom) {
+  const targetIdentity = roomIdentity(targetRoom);
+  return rooms.findIndex(room => roomIdentity(room) === targetIdentity);
+}
  
 function boosNeedsPeripheralBlock(room) {
   if (!room?.cases?.length) return room?.blockRequired || false;
@@ -148,7 +168,7 @@ function boosNeedsPeripheralBlock(room) {
     return false;
   return PERIPHERAL_BLOCK_KEYWORDS.some(k => allProcs.includes(k)) || room.blockRequired;
 }
- 
+
 // ─────────────────────────────────────────────────────────────
 export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStructure = {}, orCallChoice = null) {
   if (!rooms?.length || !qg) return { rooms, careTeams: [], floats: [], available: [] };
@@ -164,7 +184,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   // Any room already assigned by buildAssignments (block, endo, peds, cardiac) stays
   // put — we never re-process it here.
   const unassignedRooms = rooms.filter(r =>
-    !r.assignedProvider && !r.isORCallChoice
+    !r.assignedProvider && !r.isORCallChoice && !isAddOnReserveRoom(r)
   );
  
   // globalUsed: EVERY provider already assigned by the time buildCareTeams runs.
@@ -236,16 +256,17 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   // Without this fallback, the whole endo block (including phantom add-on
   // generation) would be skipped when Brand isn't working.
   const committedEndo = Math.min(Math.ceil(parseFloat(resourceStructure.endo) || 0), 3);
-  const endoMD = (brandMD && !usedMDs.has(brandMD.name))
+  const endoCareTeamContext = { area: 'endo' };
+  const endoMD = (brandMD && !usedMDs.has(brandMD.name) && isEligibleForCareTeam(brandMD, endoCareTeamContext))
     ? brandMD
-    : availableMDs.find(p => !usedMDs.has(p.name));
-  if (endoMD && committedEndo > 0) {
+    : availableMDs.find(p => !usedMDs.has(p.name) && isEligibleForCareTeam(p, endoCareTeamContext));
+  if (endoMD && committedEndo > 0 && endoRooms.length > 0) {
     // How many visible (cube) endo rooms we'll use: capped at committed
     const visibleCount  = Math.min(endoRooms.length, committedEndo);
     const visibleToUse  = endoRooms.slice(0, visibleCount);
-    // How many phantom Add-On rooms to generate to reach committed
-    const phantomCount  = committedEndo - visibleCount;
-    const totalRooms    = committedEndo;
+    // Reconciliation owns add-on creation; use only Endo rooms already present.
+    const phantomCount  = 0;
+    const totalRooms    = visibleCount;
     const endoAnests    = anesthetistPool.splice(0, totalRooms);
  
     // Real (cube) endo rooms — update in place
@@ -258,6 +279,8 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
       careTeamLabel: `Care Team 1 — ${endoMDLastName} 1:${totalRooms}`,
       careTeamRatio: `1:${totalRooms}`,
       isCareTeam:    true,
+      careTeamEligibilityNotes: getCareTeamEligibilityNotes(endoMD, endoCareTeamContext),
+      careTeamDoctrineClassifications: getCareTeamDoctrineClassifications(endoMD, endoCareTeamContext),
     }));
  
     // Phantom add-on rooms — fresh room objects appended to the rooms array
@@ -265,6 +288,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
       room:            phantomCount === 1 ? 'Endo Add-On Room' : `Endo Add-On Room ${i + 1}`,
       area:            'BMH ENDO',
       building:        'ENDO_FLOOR',
+      addOnType:       'phantom',
       isEndo:          true,
       isCareTeam:      true,
       isPhantom:       true,
@@ -292,7 +316,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
       rooms: [...visibleAssignment.map(r => r.room), ...phantomRooms.map(r => r.room)],
       anesthetists: endoAnests.map(a => a.name),
       color: CARE_TEAM_COLORS[0],
-      hasReserve: phantomCount > 0,
+      hasReserve: visibleToUse.some(r => r.roomState === 'Add-On Reserve'),
     });
  
     usedMDs.add(endoMD.name);
@@ -300,7 +324,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
 
     // Update real rooms in place
     visibleToUse.forEach((room, i) => {
-      const idx = rooms.findIndex(r => r.room === room.room);
+      const idx = findRoomIndex(rooms, room);
       if (idx >= 0) rooms[idx] = visibleAssignment[i];
     });
     // Append phantom rooms
@@ -309,17 +333,62 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
  
   // ── Care Teams B+: Main OR ────────────────────────────────────
   // Care team pool: comfortable + reluctant MDs in priority order.
-  // CARE_TEAM_AVOID (Eskew, Shepherd) are the only ones excluded — they go to
-  // solo fill. CARE_TEAM_RELUCTANT (DeWitt) is included but capped at 1:2.
-  // Excluding DeWitt left rooms going to solo fill (no AA) while AAs floated —
-  // the opposite of what we want.
+  // Hard exclusions are enforced by the care-team eligibility helper.
+  // CARE_TEAM_RELUCTANT remains capped at 1:2 if populated.
+  const reservedProtectedRoomNames = new Set();
+  const protectedRooms = mainRooms.filter(room => isProtectedExpertiseRoom(room));
+  for (const room of protectedRooms) {
+    if (room.assignedProvider) continue;
+    const md = [...PROTECTED_EXPERTISE_PREFERRED, ...PROTECTED_EXPERTISE_ALTERNATE]
+      .map(name => availableMDs.find(p => p.name === name && !usedMDs.has(p.name)))
+      .find(Boolean);
+    if (!md) continue;
+
+    const idx = findRoomIndex(rooms, room);
+    if (idx >= 0) {
+      const metadata = getProtectedExpertiseRoomMetadata(room);
+      const pathway = PROTECTED_EXPERTISE_PREFERRED.includes(md.name) ? 'Preferred' : 'Alternate';
+      rooms[idx] = {
+        ...rooms[idx],
+        assignedProvider: md.name,
+        anesthetist: null,
+        isCareTeam: false,
+        careTeamLabel: null,
+        protectedExpertiseReserved: true,
+        protectedExpertise: {
+          qualified: true,
+          reasons: metadata.reasons,
+          doctrineCategory: metadata.doctrineCategory,
+          reservedProvider: md.name,
+          pathway,
+          alternateRequired: pathway === 'Alternate',
+          note: `${pathway} qualified pathway preserved before generic care-team formation`,
+        },
+        flags: [
+          ...(rooms[idx].flags || []),
+          { level: 'info', msg: `${md.name} reserved for protected regional/block expertise before generic care-team formation` },
+        ],
+      };
+      usedMDs.add(md.name);
+      reservedProtectedRoomNames.add(room.room);
+    }
+  }
+
+  const mainCareTeamContext = {
+    area: 'main',
+    hasProtectedExpertiseRooms: protectedRooms.length > 0,
+    preserveSpecializedCoverage: true,
+  };
   const ctMDs = availableMDs.filter(p =>
     !usedMDs.has(p.name) &&
-    !CARE_TEAM_AVOID.includes(p.name)
+    isEligibleForCareTeam(p, mainCareTeamContext)
   );
 
   let ctIdx    = 1;
-  let roomPool = [...scoredMain.filter(r => roomCareTeamSuitability(r) !== 'avoid')];
+  let roomPool = [...scoredMain.filter(r =>
+    roomCareTeamSuitability(r) !== 'avoid' &&
+    !reservedProtectedRoomNames.has(r.room)
+  )];
 
 
   // Greedy loop: keep forming care teams until AAs (<2 left), eligible MDs,
@@ -413,7 +482,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     usedMDs.add(md.name);
 
     ctRooms.forEach((room, i) => {
-      const idx = rooms.findIndex(r => r.room === room.room);
+      const idx = findRoomIndex(rooms, room);
       if (idx >= 0) {
         rooms[idx] = {
           ...rooms[idx],
@@ -423,6 +492,8 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
           careTeamLabel: teamLabel,
           careTeamRatio: `1:${actualRatio}`,
           isCareTeam:    true,
+          careTeamEligibilityNotes: getCareTeamEligibilityNotes(md, mainCareTeamContext),
+          careTeamDoctrineClassifications: getCareTeamDoctrineClassifications(md, mainCareTeamContext),
         };
       }
     });
@@ -460,7 +531,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
       anesthetistPool = anesthetistPool.filter(a => !usedAnesthetists.has(a.name));
  
       boosRooms.slice(0, 2).forEach((room, i) => {
-        const idx = rooms.findIndex(r => r.room === room.room);
+        const idx = findRoomIndex(rooms, room);
         if (idx >= 0) {
           rooms[idx] = {
             ...rooms[idx],
@@ -491,7 +562,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     ...workingMDs.filter(p => p.rankNum >= 3 && p.rankNum < 50).sort((a, b) => a.rankNum - b.rankNum),
     ...workingMDs.filter(p => p.role === '7/8 Hr Shift'),
     ...workingMDs.filter(p => p.role === 'OR Call (#1)'),
-  ].filter(p => !allAssignedNow.has(p.name));
+  ].filter(p => !allAssignedNow.has(p.name) && isEligibleForSoloAssignment(p));
  
   let mdPool = [...remainingMDs];
  
@@ -504,7 +575,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
   for (const room of unassignedCathRooms) {
     const md = mdPool.find(p => !room.avoidProviders?.includes(p.name)) || mdPool[0];
     if (md) {
-      const idx = rooms.findIndex(r => r.room === room.room);
+      const idx = findRoomIndex(rooms, room);
       if (idx >= 0) {
         rooms[idx] = {
           ...rooms[idx],
@@ -532,7 +603,7 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     if (room.assignedProvider) continue;
     const md = mdPool.find(p => REGIONAL_CAPABLE.includes(p.name)) || mdPool[0];
     if (md) {
-      const idx = rooms.findIndex(r => r.room === room.room);
+      const idx = findRoomIndex(rooms, room);
       if (idx >= 0) rooms[idx] = { ...rooms[idx], assignedProvider: md.name, anesthetist: null, isCareTeam: false, careTeamLabel: null };
       mdPool = mdPool.filter(p => p.name !== md.name);
       usedMDs.add(md.name);
@@ -544,8 +615,31 @@ export function buildCareTeams(rooms, qg, anesthetistHistory = {}, resourceStruc
     if (room.assignedProvider) continue;
     const md = mdPool.find(p => !room.avoidProviders?.includes(p.name)) || mdPool[0];
     if (md) {
-      const idx = rooms.findIndex(r => r.room === room.room);
+      const idx = findRoomIndex(rooms, room);
       if (idx >= 0) rooms[idx] = { ...rooms[idx], assignedProvider: md.name, anesthetist: null, isCareTeam: false, careTeamLabel: null };
+      mdPool = mdPool.filter(p => p.name !== md.name);
+      usedMDs.add(md.name);
+    }
+  }
+
+  // Add-on reserves are attending-owned capacity, not active AA staffing.
+  // Use the remaining solo-priority pool after booked rooms, but leave
+  // anesthetist empty until the slot turns into procedural work.
+  const unassignedReserveRooms = rooms.filter(r => isAddOnReserveRoom(r) && !r.assignedProvider);
+  for (const room of unassignedReserveRooms) {
+    const md = mdPool.find(p => !room.avoidProviders?.includes(p.name)) || mdPool[0];
+    if (md) {
+      const idx = findRoomIndex(rooms, room);
+      if (idx >= 0) {
+        rooms[idx] = {
+          ...rooms[idx],
+          assignedProvider: md.name,
+          anesthetist: null,
+          isCareTeam: false,
+          careTeamLabel: null,
+          careTeamRatio: null,
+        };
+      }
       mdPool = mdPool.filter(p => p.name !== md.name);
       usedMDs.add(md.name);
     }

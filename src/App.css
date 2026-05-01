@@ -125,12 +125,41 @@
 /* ── LEGEND ── */
 .legend { font-size:12px; color:var(--text-muted); margin-bottom:12px; line-height:2; }
 
+/* ASSIGNMENT REVIEW */
+.review-shell { display:flex; flex-direction:column; gap:14px; }
+.review-header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }
+.review-actions { display:flex; align-items:center; gap:10px; flex-shrink:0; }
+.review-save-status { color:var(--accent-green); font-size:12px; font-weight:700; white-space:nowrap; }
+.review-summary { display:grid; grid-template-columns:repeat(4,minmax(140px,1fr)); gap:10px; margin-bottom:2px; }
+.review-metric { background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; }
+.review-metric-label { font-size:10px; color:var(--text-muted); letter-spacing:1px; font-weight:700; margin-bottom:4px; }
+.review-metric-value { font-size:18px; color:var(--text-primary); font-weight:800; }
+.review-table-wrap { background:#ffffff; border:1px solid var(--border); border-radius:var(--radius); overflow:auto; }
+.review-table { width:100%; border-collapse:collapse; min-width:1360px; }
+.review-table th { background:var(--bg-elevated); color:var(--text-muted); border-bottom:1px solid var(--border); padding:8px 10px; text-align:left; font-size:10px; letter-spacing:1px; font-weight:700; white-space:nowrap; }
+.review-table td { border-bottom:1px solid var(--border); padding:9px 10px; vertical-align:top; font-size:12px; color:var(--text-secondary); }
+.review-table tr:last-child td { border-bottom:none; }
+.review-room { color:var(--text-primary); font-weight:800; white-space:nowrap; }
+.review-cases { min-width:210px; line-height:1.5; }
+.review-select { width:100%; background:#ffffff; border:1px solid var(--border); border-radius:var(--radius-sm); color:var(--text-primary); padding:6px 8px; font-size:12px; font-weight:600; }
+.review-select:disabled, .review-select-disabled { background:var(--bg-elevated); color:var(--text-faint); border-color:var(--border); cursor:not-allowed; opacity:0.75; }
+.review-provider-select { min-width:145px; }
+.review-better-select { min-width:125px; color:var(--accent-green); }
+.review-severity-select { min-width:110px; color:var(--accent-amber); }
+.review-category-select { min-width:210px; }
+.review-explanation { min-width:250px; line-height:1.5; }
+.review-doctrine { min-width:260px; color:var(--text-muted); line-height:1.5; font-style:italic; }
+
 /* ── RESPONSIVE ── */
 @media (max-width: 1100px) {
   .grid-3 { grid-template-columns:1fr 1fr; }
+  .review-summary { grid-template-columns:1fr 1fr; }
 }
 @media (max-width: 768px) {
   .grid-2, .grid-3 { grid-template-columns:1fr; }
+  .review-summary { grid-template-columns:1fr; }
+  .review-header { flex-direction:column; }
+  .review-actions { width:100%; justify-content:space-between; }
   .header-title { font-size:15px; }
   .tabs { overflow-x:auto; }
   .tab { white-space:nowrap; padding:10px 10px; font-size:11px; }

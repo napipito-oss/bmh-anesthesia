@@ -232,12 +232,12 @@ export const PROVIDERS = {
   "Shepherd": {
     type:"MD", employed:false, locum:true, fullName:"Shepherd, Meredith",
     strengths:["Generalist"],
-    avoidances:["Care teams (prefers solo)"],
-    careTeam:false, blockCapable:true, thoracicCapable:false,
-    callPref:"Solo assignments preferred",
+    avoidances:[],
+    careTeam:true, blockCapable:true, thoracicCapable:false,
+    callPref:"Available for solo or care-team assignments",
     lateStay:"unknown", acuity:"medium-high",
-    notes:"Shepherd, Meredith. Occasional locum. Avoids care teams.",
-    flags:["No care teams preferred"]
+    notes:"Shepherd, Meredith. Occasional locum.",
+    flags:[]
   },
 };
 

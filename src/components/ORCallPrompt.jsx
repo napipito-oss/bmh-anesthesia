@@ -60,7 +60,7 @@ export default function ORCallPrompt({ orCallProvider, rooms, anesthetistCount =
     // OR Call can only be available if there's at least 1 provider more than
     // the minimum needed to cover all rooms without them.
     if (choice === 'available') {
-      const nonCardiacRooms = rooms.filter(r => !r.isCardiac && !r.isCathEP);
+      const nonCardiacRooms = rooms.filter(r => !r.staffingExcluded && !r.isCardiac && !r.isCathEP);
       const endoCount  = nonCardiacRooms.filter(r => r.isEndo).length;
       const irCount    = nonCardiacRooms.filter(r => r.isIR).length;
       const boosCount  = nonCardiacRooms.filter(r => r.isBOOS).length;
@@ -87,7 +87,7 @@ export default function ORCallPrompt({ orCallProvider, rooms, anesthetistCount =
       return;
     }
     if (choice === 'careteam') {
-      const careTeamRooms = rooms.filter(r => !r.isCardiac && !r.isCathEP && !r.isIR && !r.isEndo);
+      const careTeamRooms = rooms.filter(r => !r.staffingExcluded && !r.isCardiac && !r.isCathEP && !r.isIR && !r.isEndo);
       if (careTeamRooms.length === 0) {
         setWarning('No care-team-eligible rooms found in today\'s schedule. Choose Available or a specific room instead.');
         return;
@@ -112,7 +112,7 @@ export default function ORCallPrompt({ orCallProvider, rooms, anesthetistCount =
     { value: 'available', label: '— Available (no room assignment) —' },
     { value: 'careteam',  label: '— Join a Care Team —' },
     ...rooms
-      .filter(r => !r.isCardiac && !r.isCathEP)
+      .filter(r => !r.staffingExcluded && !r.isCardiac && !r.isCathEP)
       .map(r => ({
         value: r.room,
         label: `${r.room} — ${r.cases?.map(c=>c.procedure).join(' / ').slice(0,50) || r.acuity}${r.blockRequired?' [BLOCK]':''}${r.isRobotic?' [ROBOTIC]':''}`,
